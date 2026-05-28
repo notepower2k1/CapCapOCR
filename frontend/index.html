@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CapCapOCR Phase 2</title>
+    <link rel="stylesheet" href="/frontend/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="toolbar card">
+        <div>
+          <p class="eyebrow">Phase 2 Manga Workflow</p>
+          <h1>CapCapOCR Review Console</h1>
+          <p class="muted">
+            Upload a manga page, review OCR blocks, group text in reading order,
+            translate to English, and preview overlay bubbles.
+          </p>
+        </div>
+        <div class="toolbar-actions">
+          <label class="file-input">
+            <span>Upload Image</span>
+            <input id="imageInput" type="file" accept="image/*" />
+          </label>
+          <select id="sourceLang">
+            <option value="ja">Japanese</option>
+            <option value="auto">Auto</option>
+          </select>
+          <select id="targetLang">
+            <option value="en">English</option>
+            <option value="vi">Vietnamese</option>
+            <option value="es">Spanish</option>
+            <option value="fr">French</option>
+            <option value="de">German</option>
+          </select>
+          <button id="detectButton" type="button">Detect OCR</button>
+          <button id="phase2Button" type="button" disabled>Run Phase 2</button>
+          <button id="overlayButton" type="button" disabled>Show Overlay</button>
+          <button id="exportButton" type="button" disabled>Export JSON</button>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <div class="card canvas-panel">
+          <div class="panel-header">
+            <h2>Canvas Preview</h2>
+            <div class="panel-actions">
+              <label class="control-inline">
+                <span>Overlay Size</span>
+                <input id="overlayFontSize" type="range" min="12" max="48" step="1" value="20" />
+                <strong id="overlayFontSizeValue">20</strong>
+              </label>
+              <button id="resetViewButton" type="button">Reset View</button>
+              <span id="zoomLabel">100%</span>
+            </div>
+          </div>
+          <canvas id="previewCanvas"></canvas>
+          <p class="canvas-hint">
+            Wheel to zoom. Drag to pan. Click a bounding box to focus its OCR block.
+          </p>
+        </div>
+
+        <aside class="card sidebar">
+          <div class="panel-header">
+            <h2>Text Units</h2>
+            <span id="blockCount">0 blocks</span>
+          </div>
+          <p id="statusMessage" class="status idle">Select an image to begin.</p>
+          <div class="sidebar-tabs">
+            <button id="showBlocksButton" class="tab-button active" type="button">Blocks</button>
+            <button id="showGroupsButton" class="tab-button" type="button">Groups</button>
+          </div>
+          <div id="blockList" class="block-list"></div>
+          <div id="groupList" class="block-list hidden"></div>
+        </aside>
+      </section>
+    </main>
+
+    <template id="blockTemplate">
+      <article class="block-card">
+        <div class="block-meta">
+          <strong class="block-id"></strong>
+          <span class="block-confidence"></span>
+        </div>
+        <div class="block-submeta">
+          <span class="block-direction"></span>
+        </div>
+        <textarea class="block-text" rows="4"></textarea>
+      </article>
+    </template>
+
+    <template id="groupTemplate">
+      <article class="block-card group-card">
+        <div class="block-meta">
+          <strong class="group-id"></strong>
+          <span class="group-order"></span>
+        </div>
+        <div class="block-submeta">
+          <span class="group-blocks"></span>
+        </div>
+        <div class="group-order-editor">
+          <button class="group-order-down" type="button">Up</button>
+          <label class="field-label field-inline-label">Reading Order</label>
+          <input class="group-order-input" type="number" min="1" step="1" />
+          <button class="group-order-up" type="button">Down</button>
+        </div>
+        <label class="field-label">Source</label>
+        <textarea class="group-source" rows="3"></textarea>
+        <label class="field-label">Corrected JP</label>
+        <textarea class="group-corrected" rows="3"></textarea>
+        <label class="field-label">Translation</label>
+        <textarea class="group-translation" rows="3"></textarea>
+      </article>
+    </template>
+
+    <script src="/frontend/app.js"></script>
+  </body>
+</html>
