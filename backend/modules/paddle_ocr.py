@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PIL import ImageOps
 
+from backend.modules.bubble_detector import BubbleDetector
 from backend.modules.errors import OCRDependencyError, OCRError
 from backend.modules.image_utils import (
     crop_manga_bubble_region,
@@ -27,6 +28,7 @@ from backend.modules.image_utils import (
     rect_width,
     union_bbox,
 )
+from backend.modules.gguf_ocr import GGUFMangaOCRRecognizer
 from backend.modules.manga_ocr import MangaOCRRecognizer
 from backend.schemas.block import ImageMeta, OCRResponse, TextBlock
 
@@ -48,12 +50,17 @@ class OCREngine:
         self.config = config or OCRConfig()
         self._ocr_instance: Any | None = None
         self._manga_ocr = MangaOCRRecognizer()
+        self._gguf_ocr = GGUFMangaOCRRecognizer()
+        self._bubble_detector = BubbleDetector()
 
     def _get_instance(self) -> Any:
         if self._ocr_instance is not None:
             return self._ocr_instance
 
         try:
+            # Preload torch before PaddleOCR on Windows to avoid a transient
+            # DLL-loading conflict through albumentations.pytorch.
+            import torch  # noqa: F401
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise OCRDependencyError(
@@ -66,6 +73,7 @@ class OCREngine:
                 use_angle_cls=self.config.use_angle_cls,
                 lang=self.config.lang,
                 show_log=False,
+                enable_mkldnn=False,
             )
         except Exception as exc:  # pragma: no cover - depends on runtime environment
             raise OCRDependencyError(
@@ -75,7 +83,13 @@ class OCREngine:
 
         return self._ocr_instance
 
-    def process_image(self, image_bytes: bytes, source_lang: str = "ja") -> OCRResponse:
+    def process_image(
+        self,
+        image_bytes: bytes,
+        source_lang: str = "ja",
+        ocr_engine: str = "auto",
+        detection_engine: str = "text",
+    ) -> OCRResponse:
         try:
             image_array, width, height = load_image_from_bytes(image_bytes)
         except ValueError as exc:
@@ -84,29 +98,104 @@ class OCREngine:
         if source_lang not in {"ja", "auto"}:
             raise OCRError("`source_lang` must be `ja` or `auto`.")
 
-        ocr = self._get_instance()
+        mode = self._resolve_ocr_engine(source_lang=source_lang, ocr_engine=ocr_engine)
+        detection_mode = self._resolve_detection_engine(
+            source_lang=source_lang,
+            detection_engine=detection_engine,
+        )
 
         try:
-            if source_lang == "ja":
-                raw_result = self._run_paddle_ocr(
-                    image_array,
-                    det=True,
-                    rec=False,
-                    cls=True,
+            if mode == "gguf":
+                blocks = self._detect_and_recognize(
+                    image_array=image_array,
+                    recognizer="gguf",
+                    detection_engine=detection_mode,
                 )
-            else:
-                raw_result = self._run_paddle_ocr(
-                    image_array,
-                    cls=True,
+                if not blocks:
+                    blocks = self._recognize_with_gguf(image_array)
+                return OCRResponse(image=ImageMeta(width=width, height=height), blocks=blocks)
+
+            if mode == "hybrid":
+                blocks = self._detect_and_recognize(
+                    image_array=image_array,
+                    recognizer="manga",
+                    detection_engine=detection_mode,
                 )
+                return OCRResponse(image=ImageMeta(width=width, height=height), blocks=blocks)
+
+            if detection_mode == "bubble":
+                raise OCRError("`ocr_engine=paddle` does not support `detection_engine=bubble`.")
+
+            raw_result = self._run_paddle_ocr(
+                image_array,
+                cls=True,
+            )
         except Exception as exc:  # pragma: no cover - Paddle runtime errors vary
             raise OCRError(f"OCR processing failed: {exc}") from exc
 
-        if source_lang == "ja":
-            blocks = self._parse_detection_result(image_array, raw_result)
-        else:
-            blocks = self._parse_full_result(raw_result)
+        blocks = self._parse_full_result(raw_result)
         return OCRResponse(image=ImageMeta(width=width, height=height), blocks=blocks)
+
+    def _resolve_ocr_engine(self, source_lang: str, ocr_engine: str) -> str:
+        normalized = ocr_engine.strip().lower()
+        if normalized not in {"auto", "gguf", "hybrid", "paddle"}:
+            raise OCRError("`ocr_engine` must be `auto`, `gguf`, `hybrid`, or `paddle`.")
+
+        if normalized == "auto":
+            return "gguf" if source_lang == "ja" else "paddle"
+
+        if normalized in {"gguf", "hybrid"} and source_lang != "ja":
+            raise OCRError(f"`ocr_engine={normalized}` requires `source_lang=ja`.")
+
+        return normalized
+
+    def _resolve_detection_engine(self, source_lang: str, detection_engine: str) -> str:
+        normalized = detection_engine.strip().lower()
+        if normalized not in {"text", "bubble"}:
+            raise OCRError("`detection_engine` must be `text` or `bubble`.")
+        if normalized == "bubble" and source_lang != "ja":
+            raise OCRError("`detection_engine=bubble` requires `source_lang=ja`.")
+        return normalized
+
+    def _detect_and_recognize(
+        self,
+        image_array: Any,
+        recognizer: str,
+        detection_engine: str,
+    ) -> list[TextBlock]:
+        if detection_engine == "bubble":
+            return self._detect_bubbles_and_recognize(image_array, recognizer=recognizer)
+
+        raw_result = self._run_paddle_ocr(
+            image_array,
+            det=True,
+            rec=False,
+            cls=True,
+        )
+        return self._parse_detection_result(image_array, raw_result, recognizer=recognizer)
+
+    def _recognize_with_gguf(self, image_array: Any) -> list[TextBlock]:
+        from PIL import Image
+
+        rgb = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb)
+        text = self._normalize_japanese_text(self._gguf_ocr.recognize(image))
+        height, width = image_array.shape[:2]
+        bbox = [
+            [0, 0],
+            [width, 0],
+            [width, height],
+            [0, height],
+        ]
+        return [
+            TextBlock(
+                id=1,
+                bbox=bbox,
+                text=text,
+                confidence=0.0,
+                direction=infer_direction(bbox),
+            )
+        ]
 
     def _parse_full_result(self, raw_result: Any) -> list[TextBlock]:
         if not raw_result:
@@ -140,7 +229,12 @@ class OCREngine:
 
         return blocks
 
-    def _parse_detection_result(self, image_array: Any, raw_result: Any) -> list[TextBlock]:
+    def _parse_detection_result(
+        self,
+        image_array: Any,
+        raw_result: Any,
+        recognizer: str = "manga",
+    ) -> list[TextBlock]:
         if not raw_result:
             return []
 
@@ -168,10 +262,11 @@ class OCREngine:
             merged_bbox = union_bbox(group)
 
             try:
-                text = self._recognize_manga_group(
+                text = self._recognize_group(
                     image_array=image_array,
                     group=group,
                     total_groups=len(merged_groups),
+                    recognizer=recognizer,
                 )
             except Exception as exc:
                 raise OCRError(f"Japanese OCR failed on merged crop: {exc}") from exc
@@ -187,6 +282,110 @@ class OCREngine:
             )
 
         return blocks
+
+    def _detect_bubbles_and_recognize(
+        self,
+        image_array: Any,
+        recognizer: str,
+    ) -> list[TextBlock]:
+        bubble_bboxes = self._bubble_detector.detect(image_array)
+        if not bubble_bboxes:
+            return []
+
+        text_boxes: list[list[list[int]]] = []
+        for bubble_bbox in bubble_bboxes:
+            rect = rect_from_bbox(bubble_bbox)
+            left, top, right, bottom = rect
+            if right <= left or bottom <= top:
+                continue
+
+            bubble_crop = image_array[top:bottom, left:right]
+            if bubble_crop.size == 0:
+                continue
+
+            raw_result = self._run_paddle_ocr(
+                bubble_crop,
+                det=True,
+                rec=False,
+                cls=True,
+            )
+            local_boxes = self._extract_detection_boxes(raw_result)
+            for bbox in local_boxes:
+                shifted = [[point[0] + left, point[1] + top] for point in bbox]
+                if rect_intersection_area(rect_from_bbox(shifted), rect) > 0:
+                    text_boxes.append(shifted)
+
+        if not text_boxes:
+            return []
+
+        return self._parse_detection_boxes(image_array, text_boxes, recognizer=recognizer)
+
+    def _parse_detection_boxes(
+        self,
+        image_array: Any,
+        raw_boxes: list[list[list[int]]],
+        recognizer: str = "manga",
+    ) -> list[TextBlock]:
+        merged_groups = self._group_japanese_regions(raw_boxes)
+        blocks: list[TextBlock] = []
+
+        for index, group in enumerate(merged_groups, start=1):
+            merged_bbox = union_bbox(group)
+            try:
+                text = self._recognize_group(
+                    image_array=image_array,
+                    group=group,
+                    total_groups=len(merged_groups),
+                    recognizer=recognizer,
+                )
+            except Exception as exc:
+                raise OCRError(f"Japanese OCR failed on merged crop: {exc}") from exc
+
+            blocks.append(
+                TextBlock(
+                    id=index,
+                    bbox=merged_bbox,
+                    text=text,
+                    confidence=0.0,
+                    direction=infer_direction(merged_bbox),
+                )
+            )
+
+        return blocks
+
+    def _extract_detection_boxes(self, raw_result: Any) -> list[list[list[int]]]:
+        if not raw_result:
+            return []
+
+        first_page = raw_result[0] if isinstance(raw_result, list) else raw_result
+        raw_boxes: list[list[list[int]]] = []
+
+        for item in first_page or []:
+            bbox_points = item
+            if (
+                item
+                and len(item) >= 2
+                and isinstance(item[0], (list, tuple))
+                and len(item[0]) == 2
+                and isinstance(item[0][0], (int, float))
+            ):
+                bbox_points = item
+            elif item and isinstance(item[0], (list, tuple)):
+                bbox_points = item[0]
+            raw_boxes.append(normalize_bbox(bbox_points))
+
+        return raw_boxes
+
+    def _recognize_group(
+        self,
+        image_array: Any,
+        group: list[list[list[int]]],
+        total_groups: int,
+        recognizer: str,
+    ) -> str:
+        if recognizer == "gguf":
+            return self._recognize_gguf_group(image_array, group)
+        return self._recognize_manga_group(image_array, group, total_groups)
 
     def _group_japanese_regions(self, bboxes: list[list[list[int]]]) -> list[list[list[list[int]]]]:
         if not bboxes:
@@ -428,6 +627,35 @@ class OCREngine:
         if not ranked:
             return ""
         return max(ranked, key=lambda item: self._score_candidate(item[0], item[1], item[2]))[0]
+
+    def _recognize_gguf_group(
+        self,
+        image_array: Any,
+        group: list[list[list[int]]],
+    ) -> str:
+        merged_bbox = union_bbox(group)
+        candidates: list[tuple[str, float, str]] = []
+
+        merged_crop = crop_polygon_region(
+            image_array,
+            merged_bbox,
+            padding=self.config.region_crop_padding,
+        )
+        bubble_crop = crop_manga_bubble_region(
+            image_array,
+            merged_bbox,
+            padding=self.config.region_crop_padding,
+        )
+
+        for crop, source in ((merged_crop, "gguf-merged"), (bubble_crop, "gguf-bubble")):
+            text = self._normalize_japanese_text(self._gguf_ocr.recognize(crop))
+            if text:
+                candidates.append((text, 0.0, source))
+
+        if not candidates:
+            return ""
+
+        return max(candidates, key=lambda item: self._score_candidate(item[0], item[1], item[2]))[0]
 
     def _sort_group_boxes(self, group: list[list[list[int]]]) -> list[list[list[int]]]:
         merged_bbox = union_bbox(group)

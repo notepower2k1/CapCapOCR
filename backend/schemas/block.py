@@ -24,6 +24,8 @@ class OCRResponse(BaseModel):
 class OCRBase64Request(BaseModel):
     image_base64: str
     source_lang: str = "ja"
+    ocr_engine: str = "gguf"
+    detection_engine: str = "text"
 
 
 class TextGroup(BaseModel):
@@ -44,6 +46,9 @@ class Phase2Request(BaseModel):
     image: ImageMeta
     blocks: list[TextBlock] = Field(default_factory=list)
     source_lang: str = "ja"
+    ocr_engine: str = "gguf"
+    detection_engine: str = "text"
+    translator_engine: str = "local"
     target_lang: str = "en"
     translate: bool = True
 

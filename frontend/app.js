@@ -25,7 +25,10 @@ const state = {
 const elements = {
   imageInput: document.getElementById("imageInput"),
   sourceLang: document.getElementById("sourceLang"),
+  ocrEngine: document.getElementById("ocrEngine"),
+  detectionEngine: document.getElementById("detectionEngine"),
   targetLang: document.getElementById("targetLang"),
+  translatorEngine: document.getElementById("translatorEngine"),
   detectButton: document.getElementById("detectButton"),
   phase2Button: document.getElementById("phase2Button"),
   overlayButton: document.getElementById("overlayButton"),
@@ -92,6 +95,33 @@ function updateOverlayFontSizeLabel() {
   elements.overlayFontSizeValue.textContent = `${state.overlayFontSize}`;
 }
 
+function syncOcrEngineOptions() {
+  const sourceLang = elements.sourceLang.value;
+  const ggufOption = elements.ocrEngine.querySelector('option[value="gguf"]');
+  const hybridOption = elements.ocrEngine.querySelector('option[value="hybrid"]');
+  const japaneseOnlyAllowed = sourceLang === "ja";
+
+  if (ggufOption) {
+    ggufOption.disabled = !japaneseOnlyAllowed;
+  }
+  if (hybridOption) {
+    hybridOption.disabled = !japaneseOnlyAllowed;
+  }
+
+  if (!japaneseOnlyAllowed && ["gguf", "hybrid"].includes(elements.ocrEngine.value)) {
+    elements.ocrEngine.value = "auto";
+  }
+
+  const bubbleAllowed = japaneseOnlyAllowed && elements.ocrEngine.value !== "paddle";
+  const bubbleOption = elements.detectionEngine.querySelector('option[value="bubble"]');
+  if (bubbleOption) {
+    bubbleOption.disabled = !bubbleAllowed;
+  }
+  if (!bubbleAllowed && elements.detectionEngine.value === "bubble") {
+    elements.detectionEngine.value = "text";
+  }
+}
+
 function drawScene() {
   const rect = elements.previewCanvas.getBoundingClientRect();
   ctx.clearRect(0, 0, rect.width, rect.height);
@@ -148,58 +178,88 @@ function drawGroupOverlay() {
       return;
     }
 
-    const [topLeft, topRight, bottomRight, bottomLeft] = group.bbox;
-    const x = topLeft[0];
-    const y = topLeft[1];
-    const width = topRight[0] - topLeft[0];
-    const height = bottomRight[1] - topRight[1];
-    const padding = 8 / state.zoom;
-    const fontSize = state.overlayFontSize / state.zoom;
+    const x = group.x || group.bbox?.[0]?.[0] || 0;
+    const y = group.y || group.bbox?.[0]?.[1] || 0;
+    const width = Math.max(group.width || 0, 24 / state.zoom);
+    const height = Math.max(group.height || 0, 24 / state.zoom);
+    const padding = 4 / state.zoom;
+    const fontSize = Math.max(
+      10 / state.zoom,
+      Math.min(
+        state.overlayFontSize / state.zoom,
+        width / 5.2,
+        height / 2.2,
+      ),
+    );
+    const lineHeight = fontSize * 1.12;
+    const maxWidth = Math.max(width - padding * 2, fontSize * 2);
+    const maxLines = Math.max(Math.floor((height - padding * 2) / lineHeight), 1);
+    const lines = wrapCanvasText(ctx, group.translated_text, maxWidth, maxLines);
+    const textHeight = lines.length * lineHeight;
+    const startY = y + Math.max((height - textHeight) / 2, 0);
+    const radius = Math.min(width, height) * 0.16;
 
     ctx.save();
-    ctx.fillStyle = "rgba(255, 250, 244, 0.86)";
-    ctx.strokeStyle = "rgba(148, 47, 29, 0.55)";
-    ctx.lineWidth = 2 / state.zoom;
-    ctx.fillRect(x, y, width, height);
-    ctx.strokeRect(x, y, width, height);
-    ctx.fillStyle = "#2e2018";
+    drawRoundedRect(ctx, x, y, width, height, radius);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.98)";
+    ctx.fill();
+    ctx.fillStyle = "#111111";
     ctx.font = `${fontSize}px Segoe UI`;
+    ctx.textAlign = "center";
     ctx.textBaseline = "top";
-    wrapCanvasText(
-      ctx,
-      group.translated_text,
-      x + padding,
-      y + padding,
-      Math.max(width - padding * 2, fontSize * 2),
-      fontSize * 1.25,
-      Math.max(Math.floor((height - padding * 2) / (fontSize * 1.25)), 1),
-    );
+    ctx.shadowColor = "rgba(255, 255, 255, 0.96)";
+    ctx.shadowBlur = 5 / state.zoom;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    lines.forEach((line, index) => {
+      ctx.fillText(line, x + width / 2, startY + index * lineHeight);
+    });
     ctx.restore();
   });
 }
 
-function wrapCanvasText(ctxRef, text, x, y, maxWidth, lineHeight, maxLines) {
+function wrapCanvasText(ctxRef, text, maxWidth, maxLines) {
   const words = text.split(/\s+/);
+  if (words.length === 0) {
+    return [];
+  }
+
   let line = "";
-  let lineIndex = 0;
+  const lines = [];
 
   for (const word of words) {
     const testLine = line ? `${line} ${word}` : word;
     if (ctxRef.measureText(testLine).width > maxWidth && line) {
-      ctxRef.fillText(line, x, y + lineIndex * lineHeight);
+      lines.push(line);
       line = word;
-      lineIndex += 1;
-      if (lineIndex >= maxLines) {
-        return;
+      if (lines.length >= maxLines) {
+        return lines;
       }
     } else {
       line = testLine;
     }
   }
 
-  if (lineIndex < maxLines && line) {
-    ctxRef.fillText(line, x, y + lineIndex * lineHeight);
+  if (lines.length < maxLines && line) {
+    lines.push(line);
   }
+
+  return lines;
+}
+
+function drawRoundedRect(ctxRef, x, y, width, height, radius) {
+  const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
+  ctxRef.beginPath();
+  ctxRef.moveTo(x + safeRadius, y);
+  ctxRef.lineTo(x + width - safeRadius, y);
+  ctxRef.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
+  ctxRef.lineTo(x + width, y + height - safeRadius);
+  ctxRef.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
+  ctxRef.lineTo(x + safeRadius, y + height);
+  ctxRef.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
+  ctxRef.lineTo(x, y + safeRadius);
+  ctxRef.quadraticCurveTo(x, y, x + safeRadius, y);
+  ctxRef.closePath();
 }
 
 async function handleFileChange(event) {
@@ -235,6 +295,8 @@ async function detectOCR() {
   const formData = new FormData();
   formData.append("image", state.imageFile);
   formData.append("source_lang", elements.sourceLang.value);
+  formData.append("ocr_engine", elements.ocrEngine.value);
+  formData.append("detection_engine", elements.detectionEngine.value);
 
   setStatus("Running OCR. The first request may be slower while PaddleOCR initializes.", "loading");
   elements.detectButton.disabled = true;
@@ -394,6 +456,9 @@ async function runPhase2() {
         image: state.imageMeta,
         blocks: state.blocks,
         source_lang: elements.sourceLang.value,
+        ocr_engine: elements.ocrEngine.value,
+        detection_engine: elements.detectionEngine.value,
+        translator_engine: elements.translatorEngine.value,
         target_lang: elements.targetLang.value,
         translate: true,
       }),
@@ -415,7 +480,7 @@ async function runPhase2() {
     setStatus(
       payload.translation_enabled
         ? `Phase 2 completed. ${state.groups.length} grouped text unit(s) translated.`
-        : `Phase 2 completed. ${state.groups.length} grouped text unit(s) ordered locally. Set GEMINI_API_KEY to enable translation.`,
+        : `Phase 2 completed. ${state.groups.length} grouped text unit(s) ordered locally. Configure the selected translator engine to enable translation.`,
       "success",
     );
   } catch (error) {
@@ -511,6 +576,9 @@ function exportJSON() {
     },
     settings: {
       source_lang: elements.sourceLang.value,
+      ocr_engine: elements.ocrEngine.value,
+      detection_engine: elements.detectionEngine.value,
+      translator_engine: elements.translatorEngine.value,
       target_lang: elements.targetLang.value,
       overlay_font_size: state.overlayFontSize,
     },
@@ -619,6 +687,8 @@ function handleCanvasWheel(event) {
 }
 
 elements.imageInput.addEventListener("change", handleFileChange);
+elements.sourceLang.addEventListener("change", syncOcrEngineOptions);
+elements.ocrEngine.addEventListener("change", syncOcrEngineOptions);
 elements.detectButton.addEventListener("click", detectOCR);
 elements.phase2Button.addEventListener("click", runPhase2);
 elements.overlayButton.addEventListener("click", () => {
@@ -646,3 +716,4 @@ window.addEventListener("resize", syncCanvasResolution);
 
 syncCanvasResolution();
 updateOverlayFontSizeLabel();
+syncOcrEngineOptions();

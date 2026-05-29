@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "CapCapOCR Test Client",
+  "version": "0.1.0",
+  "description": "Capture the current tab and send it to the local CapCapOCR OCR API.",
+  "permissions": ["activeTab", "storage", "tabs", "scripting"],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "CapCapOCR Test Client",
+    "default_popup": "popup.html"
+  }
+}

@@ -1,23 +1,39 @@
 # CapCapOCR
 
-Phase 2 manga OCR workflow. The app uploads a page, runs OCR, lets the user review and correct raw text blocks, groups blocks into manga text units, orders them for reading flow, translates Japanese to English with Gemma, previews overlay bubbles, and exports the result as JSON.
+Manga OCR review tool with local OCR, local translation, bubble-aware detection, overlay preview, and JSON export.
 
-## What is implemented
+Current best default stack:
+- `OCR: GGUF Manga`
+- `Detect: YOLO Bubble`
+- `Translate: Local Gemma`
 
-- FastAPI backend with `POST /api/ocr`
-- FastAPI backend with `POST /api/ocr/base64`
-- FastAPI backend with `POST /api/phase2`
-- Plain HTML/CSS/JavaScript frontend served by the backend
-- Canvas preview with zoom, pan, bbox overlay, and block selection
-- Editable OCR block list with confidence and direction
-- Editable grouped text units with corrected Japanese and English translation
-- Manual reading-order editing for grouped text units
-- Target-language selection for Phase 2 translation
-- Overlay preview for translated bubble text with adjustable font size
-- JSON export of OCR blocks plus grouped Phase 2 output
-- Hybrid OCR: PaddleOCR detection plus `manga-ocr` recognition for Japanese
-- Phase 2 grouping, reading order, and Gemma-powered translation
-- Lazy model loading with explicit dependency errors
+## What it does
+
+- Upload a manga page in the browser
+- Detect text regions or speech bubbles
+- Run Japanese OCR locally
+- Group blocks into readable manga text units
+- Translate locally with a GGUF Gemma model or via Gemini API
+- Preview translated overlays that hide the original text
+- Export blocks and groups as JSON
+
+## Implemented
+
+- FastAPI backend
+- Plain HTML/CSS/JavaScript frontend
+- Browser extension test client
+- OCR engines:
+  - `gguf`: `PaddleOCR-VL-For-Manga` GGUF via `llama-cpp-python`
+  - `hybrid`: Paddle detection + `manga-ocr`
+  - `paddle`: Paddle-only OCR
+- Detection engines:
+  - `text`: Paddle text detection
+  - `bubble`: YOLO speech-bubble detection + Paddle text detection inside bubbles
+- Translation engines:
+  - `local`: Gemma GGUF via `llama-cpp-python`
+  - `api`: Gemini API
+  - `auto`: prefer local, fall back to API if configured
+- Canvas review UI with zoom, pan, block selection, grouped text editing, and overlay preview
 
 ## Project structure
 
@@ -28,69 +44,119 @@ backend/
   schemas/
   main.py
   requirements.txt
+  requirements.ja.txt
+browser_extension/
 frontend/
   index.html
   styles.css
   app.js
-phase1.md
+ocr_ai_model/
+run_backend.bat
 ```
 
-## Recommended runtime
+## Runtime
 
-Use Python 3.11 for the PaddleOCR stack. The code is written to be compatible with 3.11+, but Paddle dependencies are usually more reliable on 3.11 than 3.12.
+Recommended:
+- Python `3.11`
+- Windows is supported and currently used in this repo setup
+
+Pinned dependency notes:
+- `paddlepaddle==3.0.0`
+- `llama-cpp-python==0.3.23` in the repo venv
+
+## Model files
+
+Expected local model files in `ocr_ai_model/`:
+
+- `PaddleOCR-VL-For-Manga-BF16.gguf`
+- `PaddleOCR-VL-For-Manga-mmproj-BF16.gguf`
+- `gemma-4-E4B-it-Q4_K_M.gguf`
+- `yolov8m_seg-speech-bubble.pt`
 
 ## Setup
 
-```bash
-source .venv/bin/activate
-pip install -r backend/requirements.txt
-pip install -r backend/requirements.ja.txt
-export GEMINI_API_KEY=your_google_ai_studio_key
-uvicorn backend.main:app --reload
+### Windows
+
+Create the venv and install:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.ja.txt
 ```
 
-Open `http://127.0.0.1:8000`.
+Start the backend:
+
+```powershell
+.\run_backend.bat
+```
+
+Or directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Open:
+- App: `http://127.0.0.1:8000`
+- Docs: `http://127.0.0.1:8000/docs`
 
 ## Environment variables
 
+Optional:
+
 - `GEMINI_API_KEY`
-  - required only for Phase 2 translation
-  - if unset, Phase 2 still performs grouping and reading order, but translation is disabled
+  - only needed for `translator_engine=api`
+- `GGUF_OCR_MODEL_PATH`
+- `GGUF_OCR_MMPROJ_PATH`
+- `GGUF_TRANSLATOR_MODEL_PATH`
+- `GGUF_OCR_N_GPU_LAYERS`
+- `BUBBLE_DETECT_MODEL_PATH`
+- `BUBBLE_DETECT_CONF`
+- `BUBBLE_DETECT_IOU`
 
-Example local `.env`:
-
-```env
-GEMINI_API_KEY=your_google_ai_studio_key
-```
-
-This repo does not auto-load `.env`, so export it before starting the server:
-
-```bash
-export $(grep -v '^#' .env | xargs)
-uvicorn backend.main:app --reload
-```
+Default behavior:
+- local GGUF OCR works if the OCR model files exist
+- local Gemma translation works if the Gemma GGUF file exists
+- Gemini API translation is disabled unless `GEMINI_API_KEY` is set
 
 ## Frontend workflow
 
-1. Upload one manga page image.
-2. Run `Detect OCR`.
-3. Review or edit raw OCR blocks.
-4. Run `Phase 2` to group text, assign reading order, and translate.
-5. Review grouped source text, corrected Japanese, and translated output.
-6. Adjust reading order manually if needed.
-7. Preview translated overlay bubbles on the canvas.
-8. Export JSON.
+1. Upload a manga page.
+2. Choose:
+   - OCR engine
+   - detection engine
+   - target language
+   - translator engine
+3. Click `Detect OCR`.
+4. Review or edit OCR blocks.
+5. Click `Run Phase 2`.
+6. Review grouped text, corrected JP, and translation.
+7. Toggle `Show Overlay` to preview translated replacement text.
+8. Export JSON if needed.
+
+Recommended settings for manga bubbles:
+
+- `Source: Japanese`
+- `OCR: GGUF Manga`
+- `Detect: YOLO Bubble`
+- `Translate: Local Gemma`
 
 ## API
 
-`POST /api/ocr`
+### `POST /api/ocr`
 
 Multipart form fields:
 
-- `image`: image upload
+- `image`: image file
 - `source_lang`: `ja` or `auto`
+- `ocr_engine`: `gguf`, `hybrid`, `paddle`, or `auto`
+- `detection_engine`: `text` or `bubble`
 
-Response shape:
+Notes:
+- `detection_engine=bubble` is intended for Japanese manga workflows
+- `ocr_engine=paddle` only supports `detection_engine=text`
+
+Response:
 
 ```json
 {
@@ -103,56 +169,33 @@ Response shape:
       "id": 1,
       "bbox": [[100, 120], [220, 120], [220, 180], [100, 180]],
       "text": "ありがとう",
-      "confidence": 0.96,
-      "direction": "horizontal"
+      "confidence": 0.0,
+      "direction": "vertical"
     }
   ]
 }
 ```
 
-`POST /api/phase2`
-
-JSON body:
-
-```json
-{
-  "image": {
-    "width": 1200,
-    "height": 1800
-  },
-  "blocks": [
-    {
-      "id": 1,
-      "bbox": [[100, 120], [220, 120], [220, 180], [100, 180]],
-      "text": "ありがとう",
-      "confidence": 0.96,
-      "direction": "vertical"
-    }
-  ],
-  "source_lang": "ja",
-  "target_lang": "en",
-  "translate": true
-}
-```
-
-`POST /api/ocr/base64`
+### `POST /api/ocr/base64`
 
 JSON body:
 
 ```json
 {
   "image_base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA...",
-  "source_lang": "ja"
+  "source_lang": "ja",
+  "ocr_engine": "gguf",
+  "detection_engine": "bubble"
 }
 ```
 
 Notes:
+- accepts either a full data URL or raw base64 bytes
+- returns the same shape as `POST /api/ocr`
 
-- accepts either a full data URL like `data:image/png;base64,...` or raw base64 bytes
-- intended for browser extensions or other clients that already capture images as data URLs
-- returns the same response shape as `POST /api/ocr`
+### `POST /api/phase2`
 
-Response shape:
+JSON body:
 
 ```json
 {
@@ -160,7 +203,41 @@ Response shape:
     "width": 1200,
     "height": 1800
   },
-  "blocks": [],
+  "blocks": [
+    {
+      "id": 1,
+      "bbox": [[100, 120], [220, 120], [220, 180], [100, 180]],
+      "text": "ありがとう",
+      "confidence": 0.0,
+      "direction": "vertical"
+    }
+  ],
+  "source_lang": "ja",
+  "ocr_engine": "gguf",
+  "detection_engine": "bubble",
+  "translator_engine": "local",
+  "target_lang": "en",
+  "translate": true
+}
+```
+
+Response:
+
+```json
+{
+  "image": {
+    "width": 1200,
+    "height": 1800
+  },
+  "blocks": [
+    {
+      "id": 1,
+      "bbox": [[100, 120], [220, 120], [220, 180], [100, 180]],
+      "text": "ありがとう",
+      "confidence": 0.0,
+      "direction": "vertical"
+    }
+  ],
   "groups": [
     {
       "id": 1,
@@ -182,30 +259,43 @@ Response shape:
 
 ## Export format
 
-The frontend JSON export includes:
+Frontend export includes:
 
 - `image`
-- `image_base64` can be used instead of multipart upload for extension-driven OCR
 - `settings`
   - `source_lang`
+  - `ocr_engine`
+  - `detection_engine`
+  - `translator_engine`
   - `target_lang`
   - `overlay_font_size`
 - `blocks`
 - `groups`
 
-For browser overlays, each Phase 2 group now includes both:
+## Browser extension
 
-- `bbox`
-- explicit `x`, `y`, `width`, `height`
+The extension lives in [browser_extension](./browser_extension).
+
+It can:
+- scan the current page for visible image candidates
+- capture one selected image
+- call `/api/ocr/base64`
+- call `/api/phase2`
+- overlay translated text back onto the page
+
+Current extension controls include:
+- OCR engine
+- detection engine
+- translator engine
+- target language
+
+Load it as an unpacked extension in Chrome or Edge after starting the backend.
 
 ## Notes
 
-- `source_lang=ja` uses PaddleOCR for region detection and `manga-ocr` for recognition on each detected crop.
-- `confidence` remains `0.0` on the Japanese hybrid path because `manga-ocr` does not expose a confidence score.
-- `source_lang=auto` currently uses the existing PaddleOCR detect+recognize path.
-- `manga-ocr` requires the CPU-only Torch install in `backend/requirements.ja.txt` and downloads model weights on first use.
-- `POST /api/phase2` works without translation if `GEMINI_API_KEY` is not set. In that case it still returns grouped text units and reading order with `translation_enabled=false`.
-- The translation step uses Google AI Studio via the Generative Language API and expects the `gemma-4-26b-a4b-it` model to be available on the configured key.
-- Phase 2 translation is conservative by design. It tries to preserve names, punctuation, and ambiguous OCR text rather than aggressively rewriting it.
-- Overlay rendering is a review preview, not final manga typesetting.
-- If PaddleOCR, PaddlePaddle, or `manga-ocr` is missing or fails to initialize, the API returns a clear `503` with setup guidance instead of crashing at startup.
+- `gguf` OCR now uses detection first, then GGUF recognition on detected groups. It no longer returns a forced single whole-page block unless detection fails.
+- `YOLO Bubble` detection helps recover missed speech bubbles, but it is still a speech-bubble detector, not a full non-bubble text detector.
+- `Paddle Text` remains useful for SFX or text outside bubbles.
+- `manga-ocr` remains available as a fallback path, but the current preferred manga setup is `GGUF + YOLO Bubble`.
+- Overlay preview is for review and testing, not polished production typesetting.
+- If required dependencies or model files are missing, the API returns clear `503` setup errors instead of crashing at startup.

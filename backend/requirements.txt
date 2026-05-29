@@ -6,4 +6,5 @@ numpy>=1.26,<3.0
 Pillow>=10.0,<12.0
 opencv-python-headless>=4.10,<5.0
 paddleocr>=2.8,<3.0
-paddlepaddle>=3.0,<4.0
+paddlepaddle==3.0.0
+ultralytics>=8.3,<9.0

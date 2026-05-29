@@ -11,7 +11,7 @@ from backend.schemas.block import OCRBase64Request, OCRResponse, Phase2Request, 
 
 
 router = APIRouter(prefix="/api", tags=["ocr"])
-ocr_engine = OCREngine()
+ocr_service = OCREngine()
 translator = GemmaTranslator()
 
 
@@ -19,6 +19,8 @@ translator = GemmaTranslator()
 async def run_ocr(
     image: UploadFile = File(...),
     source_lang: str = Form(default="ja"),
+    ocr_engine_name: str = Form(default="gguf", alias="ocr_engine"),
+    detection_engine: str = Form(default="text"),
 ) -> OCRResponse:
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(
@@ -28,7 +30,12 @@ async def run_ocr(
 
     try:
         image_bytes = await image.read()
-        return ocr_engine.process_image(image_bytes=image_bytes, source_lang=source_lang)
+        return ocr_service.process_image(
+            image_bytes=image_bytes,
+            source_lang=source_lang,
+            ocr_engine=ocr_engine_name,
+            detection_engine=detection_engine,
+        )
     except OCRDependencyError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -45,7 +52,12 @@ async def run_ocr(
 async def run_ocr_base64(request: OCRBase64Request) -> OCRResponse:
     try:
         image_bytes = _decode_base64_image(request.image_base64)
-        return ocr_engine.process_image(image_bytes=image_bytes, source_lang=request.source_lang)
+        return ocr_service.process_image(
+            image_bytes=image_bytes,
+            source_lang=request.source_lang,
+            ocr_engine=request.ocr_engine,
+            detection_engine=request.detection_engine,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -67,9 +79,17 @@ async def run_ocr_base64(request: OCRBase64Request) -> OCRResponse:
 async def run_phase2(request: Phase2Request) -> Phase2Response:
     try:
         grouped = build_text_groups(request.blocks).groups
-        translation_enabled = request.translate and translator.is_configured() and request.source_lang == "ja"
+        translation_enabled = (
+            request.translate
+            and translator.is_configured(request.translator_engine)
+            and request.source_lang == "ja"
+        )
         if translation_enabled:
-            grouped = await translator.translate_groups(grouped, request.target_lang)
+            grouped = await translator.translate_groups(
+                grouped,
+                request.target_lang,
+                request.translator_engine,
+            )
         return Phase2Response(
             image=request.image,
             blocks=request.blocks,
