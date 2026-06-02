@@ -109,6 +109,73 @@ class GeminiApiTranslator:
         return _parse_translation_content(text, content)
 
 
+class GoogleTranslateTranslator:
+    def __init__(self) -> None:
+        self.timeout_seconds = 60.0
+        self.api_url = "https://translate.googleapis.com/translate_a/single"
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def translate_groups(self, groups: list[TextGroup], target_lang: str = "en") -> list[TextGroup]:
+        translated_groups: list[TextGroup] = []
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            for group in groups:
+                result = await self._translate_single_group(client, group.source_text, target_lang)
+                translated_groups.append(
+                    group.model_copy(
+                        update={
+                            "corrected_text": result.corrected_japanese,
+                            "translated_text": result.translated_text,
+                        }
+                    )
+                )
+        return translated_groups
+
+    async def _translate_single_group(
+        self,
+        client: httpx.AsyncClient,
+        text: str,
+        target_lang: str,
+    ) -> TranslationResult:
+        if not text.strip():
+            return TranslationResult(corrected_japanese="", translated_text="")
+
+        try:
+            response = await client.get(
+                self.api_url,
+                params={
+                    "client": "gtx",
+                    "sl": "ja",
+                    "tl": target_lang,
+                    "dt": "t",
+                    "q": text,
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise OCRError(
+                f"Google Translate request timed out after {int(self.timeout_seconds)} seconds."
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise OCRError(f"Google Translate request failed: {exc}") from exc
+
+        if response.status_code >= 400:
+            raise OCRError(f"Google Translate request failed: {response.text}")
+
+        try:
+            data = response.json()
+            parts = data[0]
+            translated = "".join(str(part[0]) for part in parts if isinstance(part, list) and part)
+        except Exception as exc:
+            raise OCRError("Google Translate returned an unexpected response shape.") from exc
+
+        translated = translated.strip()
+        if not translated:
+            raise OCRError("Google Translate returned no text content.")
+
+        return TranslationResult(corrected_japanese=text.strip(), translated_text=translated)
+
+
 class LocalGemmaTranslator:
     _model_lock = Lock()
     _cached_model = None
@@ -233,6 +300,7 @@ class GemmaTranslator:
     def __init__(self) -> None:
         self._local = LocalGemmaTranslator()
         self._api = GeminiApiTranslator()
+        self._google = GoogleTranslateTranslator()
 
     def is_configured(self, translator_engine: str = "local") -> bool:
         engine = self._resolve_engine(translator_engine)
@@ -240,7 +308,9 @@ class GemmaTranslator:
             return self._local.is_configured()
         if engine == "api":
             return self._api.is_configured()
-        return self._local.is_configured() or self._api.is_configured()
+        if engine == "google":
+            return self._google.is_configured()
+        return self._local.is_configured() or self._api.is_configured() or self._google.is_configured()
 
     async def translate_groups(
         self,
@@ -253,17 +323,21 @@ class GemmaTranslator:
             return await self._local.translate_groups(groups, target_lang)
         if engine == "api":
             return await self._api.translate_groups(groups, target_lang)
+        if engine == "google":
+            return await self._google.translate_groups(groups, target_lang)
 
         if self._local.is_configured():
             return await self._local.translate_groups(groups, target_lang)
         if self._api.is_configured():
             return await self._api.translate_groups(groups, target_lang)
+        if self._google.is_configured():
+            return await self._google.translate_groups(groups, target_lang)
         raise OCRDependencyError("No translation engine is configured.")
 
     def _resolve_engine(self, translator_engine: str) -> str:
         normalized = str(translator_engine or "local").strip().lower()
-        if normalized not in {"local", "api", "auto"}:
-            raise OCRError("`translator_engine` must be `local`, `api`, or `auto`.")
+        if normalized not in {"local", "api", "google", "auto"}:
+            raise OCRError("`translator_engine` must be `local`, `api`, `google`, or `auto`.")
         return normalized
 
 

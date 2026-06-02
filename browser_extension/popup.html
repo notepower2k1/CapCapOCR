@@ -8,105 +8,148 @@
   </head>
   <body>
     <main class="app">
-      <h1>CapCapOCR Test</h1>
+      <header class="topbar">
+        <div>
+          <h1>CapCapOCR Test</h1>
+          <p class="subtitle">Run the page OCR pipeline, then inspect the output.</p>
+        </div>
+      </header>
 
-      <label class="field">
-        <span>OCR Endpoint</span>
-        <input id="apiUrl" type="text" value="http://127.0.0.1:8000/api/ocr/base64" />
-      </label>
+      <section class="section section-actions">
+        <div class="section-head static-head">
+          <div>
+            <h2>Actions</h2>
+            <p>Choose what this run should do.</p>
+          </div>
+          <span id="statusBadge" class="status-badge idle">Ready</span>
+        </div>
 
-      <label class="field">
-        <span>Phase 2 Endpoint</span>
-        <input id="phase2Url" type="text" value="http://127.0.0.1:8000/api/phase2" />
-      </label>
-
-      <div class="row">
-        <label class="field">
-          <span>Source</span>
-          <select id="sourceLang">
-            <option value="ja" selected>Japanese</option>
-            <option value="auto">Auto</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span>OCR Engine</span>
-          <select id="ocrEngine">
-            <option value="gguf" selected>GGUF Manga</option>
-            <option value="hybrid">manga-ocr Hybrid</option>
-            <option value="paddle">Paddle Only</option>
-            <option value="auto">Auto</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="row">
-        <label class="field">
-          <span>Detection</span>
-          <select id="detectionEngine">
-            <option value="text" selected>Paddle Text</option>
-            <option value="bubble">YOLO Bubble</option>
-          </select>
-        </label>
-
-        <label class="field">
-          <span>Target</span>
-          <select id="targetLang">
-            <option value="en" selected>English</option>
-            <option value="vi">Vietnamese</option>
-            <option value="es">Spanish</option>
-            <option value="fr">French</option>
-            <option value="de">German</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="row">
-        <label class="field">
-          <span>Translator</span>
-          <select id="translatorEngine">
-            <option value="local" selected>Local Gemma</option>
-            <option value="api">Gemini API</option>
-            <option value="auto">Auto</option>
-          </select>
-        </label>
-
-        <div class="field"></div>
-      </div>
-
-      <div class="actions">
-        <button id="runButton" type="button">Capture, Translate, Overlay</button>
-        <button id="clearButton" type="button" class="secondary">Clear Overlay</button>
-      </div>
-
-      <div class="row">
-        <label class="field">
+        <div class="field">
           <span>Page Image</span>
           <select id="imageCandidate"></select>
-        </label>
+        </div>
 
-        <label class="field">
-          <span>&nbsp;</span>
+        <div class="toggle-grid actions-toggle-grid">
+          <label class="toggle-option">
+            <input id="translateEnabled" type="checkbox" checked />
+            <span>Translator</span>
+          </label>
+          <label class="toggle-option">
+            <input id="overlayEnabled" type="checkbox" checked />
+            <span>Overlay Bubble</span>
+          </label>
+          <label class="toggle-option">
+            <input id="widgetEnabled" type="checkbox" checked />
+            <span>Injected Widget</span>
+          </label>
+        </div>
+
+        <div class="actions three-up">
+          <button id="runButton" type="button">Detect</button>
           <button id="refreshImagesButton" type="button" class="secondary">Refresh Images</button>
-        </label>
-      </div>
+          <button id="clearButton" type="button" class="secondary">Clear Overlay</button>
+        </div>
 
-      <p id="status" class="status idle">Ready.</p>
+        <p id="status" class="status idle">Ready.</p>
+      </section>
 
-      <label class="field">
-        <span>Joined Text</span>
-        <textarea id="joinedText" rows="8" readonly></textarea>
-      </label>
+      <section class="section collapsible" data-section="settings">
+        <button id="settingsToggle" class="section-head collapse-toggle" type="button" aria-expanded="true">
+          <div>
+            <h2>Settings</h2>
+            <p>Persistent endpoints and OCR pipeline configuration.</p>
+          </div>
+          <span class="chevron">▾</span>
+        </button>
+        <div id="settingsBody" class="section-body">
+          <label class="field">
+            <span>OCR Endpoint</span>
+            <input id="apiUrl" type="text" value="http://127.0.0.1:8000/api/ocr/base64" />
+          </label>
 
-      <label class="field">
-        <span>Overlay Text</span>
-        <textarea id="overlayText" rows="8" readonly></textarea>
-      </label>
+          <label class="field">
+            <span>Phase 2 Endpoint</span>
+            <input id="phase2Url" type="text" value="http://127.0.0.1:8000/api/phase2" />
+          </label>
 
-      <label class="field">
-        <span>Raw JSON</span>
-        <textarea id="rawJson" rows="12" readonly></textarea>
-      </label>
+          <div class="row">
+            <label class="field">
+              <span>Source</span>
+              <select id="sourceLang">
+                <option value="ja" selected>Japanese</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>OCR Engine</span>
+              <select id="ocrEngine">
+                <option value="gguf" selected>GGUF Manga</option>
+                <option value="hybrid">manga-ocr Hybrid</option>
+                <option value="paddle">Paddle Only</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="row">
+            <label class="field">
+              <span>Detection</span>
+              <select id="detectionEngine">
+                <option value="text" selected>Paddle Text</option>
+                <option value="bubble">YOLO Bubble</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Target</span>
+              <select id="targetLang">
+                <option value="en" selected>English</option>
+                <option value="vi">Vietnamese</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span>Translator</span>
+            <select id="translatorEngine">
+              <option value="local" selected>Local Gemma</option>
+              <option value="api">Gemini API</option>
+              <option value="google">Google Translate</option>
+              <option value="auto">Auto</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section class="section collapsible" data-section="details">
+        <button id="detailsToggle" class="section-head collapse-toggle" type="button" aria-expanded="false">
+          <div>
+            <h2>Details</h2>
+            <p>Inspect OCR text, overlay text, and raw API output.</p>
+          </div>
+          <span class="chevron">▾</span>
+        </button>
+        <div id="detailsBody" class="section-body is-collapsed">
+          <label class="field">
+            <span>Joined Text</span>
+            <textarea id="joinedText" rows="7" readonly></textarea>
+          </label>
+
+          <label class="field">
+            <span>Overlay Text</span>
+            <textarea id="overlayText" rows="7" readonly></textarea>
+          </label>
+
+          <label class="field">
+            <span>Raw JSON</span>
+            <textarea id="rawJson" rows="12" readonly></textarea>
+          </label>
+        </div>
+      </section>
     </main>
 
     <script src="popup.js"></script>

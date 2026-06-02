@@ -1,6 +1,6 @@
 # CapCapOCR
 
-Manga OCR review tool with local OCR, local translation, bubble-aware detection, overlay preview, and JSON export.
+Manga OCR review tool with local OCR, local translation, bubble-aware detection, overlay preview, JSON export, and a browser extension test client.
 
 Current best default stack:
 - `OCR: GGUF Manga`
@@ -13,9 +13,10 @@ Current best default stack:
 - Detect text regions or speech bubbles
 - Run Japanese OCR locally
 - Group blocks into readable manga text units
-- Translate locally with a GGUF Gemma model or via Gemini API
+- Translate with local Gemma, Gemini API, or Google Translate
 - Preview translated overlays that hide the original text
 - Export blocks and groups as JSON
+- Trigger the pipeline from a Chrome/Edge extension or from an injected in-page widget
 
 ## Implemented
 
@@ -32,8 +33,10 @@ Current best default stack:
 - Translation engines:
   - `local`: Gemma GGUF via `llama-cpp-python`
   - `api`: Gemini API
-  - `auto`: prefer local, fall back to API if configured
+  - `google`: Google Translate
+  - `auto`: prefer local, then Gemini API, then Google Translate
 - Canvas review UI with zoom, pan, block selection, grouped text editing, and overlay preview
+- Injected browser widget with `Execute` and `Remove Overlay`
 
 ## Project structure
 
@@ -46,6 +49,11 @@ backend/
   requirements.txt
   requirements.ja.txt
 browser_extension/
+  background.js
+  content.js
+  popup.html
+  popup.css
+  popup.js
 frontend/
   index.html
   styles.css
@@ -108,16 +116,30 @@ Optional:
   - only needed for `translator_engine=api`
 - `GGUF_OCR_MODEL_PATH`
 - `GGUF_OCR_MMPROJ_PATH`
-- `GGUF_TRANSLATOR_MODEL_PATH`
+- `LOCAL_TRANSLATOR_MODEL_PATH`
+- `LOCAL_TRANSLATOR_N_CTX`
+- `LOCAL_TRANSLATOR_N_THREADS`
+- `LOCAL_TRANSLATOR_N_THREADS_BATCH`
+- `LOCAL_TRANSLATOR_N_BATCH`
+- `LOCAL_TRANSLATOR_N_UBATCH`
+- `LOCAL_TRANSLATOR_GPU_LAYERS`
+- `LOCAL_TRANSLATOR_FLASH_ATTN`
+- `LOCAL_TRANSLATOR_TEMPERATURE`
+- `LOCAL_TRANSLATOR_TOP_P`
+- `LOCAL_TRANSLATOR_TOP_K`
+- `LOCAL_TRANSLATOR_REPEAT_PENALTY`
+- `LOCAL_TRANSLATOR_MAX_TOKENS`
 - `GGUF_OCR_N_GPU_LAYERS`
 - `BUBBLE_DETECT_MODEL_PATH`
 - `BUBBLE_DETECT_CONF`
 - `BUBBLE_DETECT_IOU`
+- `BUBBLE_DETECT_MAX`
 
 Default behavior:
 - local GGUF OCR works if the OCR model files exist
 - local Gemma translation works if the Gemma GGUF file exists
 - Gemini API translation is disabled unless `GEMINI_API_KEY` is set
+- Google Translate requires outbound network access from the backend
 
 ## Frontend workflow
 
@@ -221,6 +243,10 @@ JSON body:
 }
 ```
 
+Notes:
+- `translator_engine` supports `local`, `api`, `google`, and `auto`
+- `ocr_engine` and `detection_engine` are accepted in the Phase 2 request but Phase 2 itself only groups existing OCR blocks and optionally translates them
+
 Response:
 
 ```json
@@ -282,12 +308,35 @@ It can:
 - call `/api/ocr/base64`
 - call `/api/phase2`
 - overlay translated text back onto the page
+- inject a simple in-page widget with `Execute` and `Remove Overlay`
 
-Current extension controls include:
-- OCR engine
-- detection engine
-- translator engine
-- target language
+Current popup layout:
+- `Actions`
+  - page image selector
+  - `Translator` toggle
+  - `Overlay Bubble` toggle
+  - `Injected Widget` toggle
+  - `Run`, `Refresh Images`, `Clear Overlay`
+- `Settings`
+  - OCR endpoint
+  - Phase 2 endpoint
+  - source
+  - OCR engine
+  - detection engine
+  - target language
+  - translator engine
+- `Details`
+  - joined OCR text
+  - overlay text
+  - raw JSON
+
+Extension behavior:
+- `Translator` off: OCR only, no Phase 2 request
+- `Translator` on and `Overlay Bubble` off: OCR + translation, but no page overlay
+- both on: OCR + translation + page overlay
+- `Injected Widget` controls whether the page-level quick action widget is visible
+- changing `Page Image` clears the current overlay
+- refreshing image candidates clears the current overlay if the selected image changed or disappeared
 
 Load it as an unpacked extension in Chrome or Edge after starting the backend.
 
@@ -298,4 +347,5 @@ Load it as an unpacked extension in Chrome or Edge after starting the backend.
 - `Paddle Text` remains useful for SFX or text outside bubbles.
 - `manga-ocr` remains available as a fallback path, but the current preferred manga setup is `GGUF + YOLO Bubble`.
 - Overlay preview is for review and testing, not polished production typesetting.
+- The Google Translate path is a translation-only fallback. It does not do OCR correction like the LLM-based translators.
 - If required dependencies or model files are missing, the API returns clear `503` setup errors instead of crashing at startup.

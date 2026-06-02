@@ -9,31 +9,61 @@ const elements = {
   detectionEngine: document.getElementById("detectionEngine"),
   targetLang: document.getElementById("targetLang"),
   translatorEngine: document.getElementById("translatorEngine"),
+  translateEnabled: document.getElementById("translateEnabled"),
+  overlayEnabled: document.getElementById("overlayEnabled"),
+  widgetEnabled: document.getElementById("widgetEnabled"),
   imageCandidate: document.getElementById("imageCandidate"),
   refreshImagesButton: document.getElementById("refreshImagesButton"),
   runButton: document.getElementById("runButton"),
   clearButton: document.getElementById("clearButton"),
   status: document.getElementById("status"),
+  statusBadge: document.getElementById("statusBadge"),
+  settingsToggle: document.getElementById("settingsToggle"),
+  settingsBody: document.getElementById("settingsBody"),
+  detailsToggle: document.getElementById("detailsToggle"),
+  detailsBody: document.getElementById("detailsBody"),
   joinedText: document.getElementById("joinedText"),
   overlayText: document.getElementById("overlayText"),
   rawJson: document.getElementById("rawJson"),
 };
 
+const defaultUiState = {
+  settingsCollapsed: false,
+  detailsCollapsed: true,
+};
+
 let currentCandidates = [];
+let uiState = { ...defaultUiState };
 
 function setStatus(message, kind = "idle") {
   elements.status.textContent = message;
   elements.status.className = `status ${kind}`;
+  elements.statusBadge.textContent = kind === "idle" ? "Ready" : kind === "loading" ? "Working" : kind === "success" ? "OK" : "Error";
+  elements.statusBadge.className = `status-badge ${kind}`;
 }
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function applySectionState() {
+  setSectionCollapsed("settings", uiState.settingsCollapsed);
+  setSectionCollapsed("details", uiState.detailsCollapsed);
+}
+
+function setSectionCollapsed(section, collapsed) {
+  const body = section === "settings" ? elements.settingsBody : elements.detailsBody;
+  const toggle = section === "settings" ? elements.settingsToggle : elements.detailsToggle;
+  body.classList.toggle("is-collapsed", collapsed);
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  uiState[`${section}Collapsed`] = collapsed;
+}
+
 async function loadSettings() {
   const stored = await chrome.storage.local.get(STORAGE_KEY);
   const settings = stored[STORAGE_KEY];
   if (!settings) {
+    applySectionState();
     return;
   }
 
@@ -44,6 +74,15 @@ async function loadSettings() {
   elements.detectionEngine.value = settings.detectionEngine || elements.detectionEngine.value;
   elements.targetLang.value = settings.targetLang || elements.targetLang.value;
   elements.translatorEngine.value = settings.translatorEngine || elements.translatorEngine.value;
+  elements.translateEnabled.checked = settings.translateEnabled ?? elements.translateEnabled.checked;
+  elements.overlayEnabled.checked = settings.overlayEnabled ?? elements.overlayEnabled.checked;
+  elements.widgetEnabled.checked = settings.widgetEnabled ?? elements.widgetEnabled.checked;
+  uiState = {
+    settingsCollapsed: settings.ui?.settingsCollapsed ?? defaultUiState.settingsCollapsed,
+    detailsCollapsed: settings.ui?.detailsCollapsed ?? defaultUiState.detailsCollapsed,
+  };
+  applySectionState();
+  syncPipelineOptions();
 }
 
 async function saveSettings() {
@@ -56,8 +95,75 @@ async function saveSettings() {
       detectionEngine: elements.detectionEngine.value,
       targetLang: elements.targetLang.value,
       translatorEngine: elements.translatorEngine.value,
+      translateEnabled: elements.translateEnabled.checked,
+      overlayEnabled: elements.overlayEnabled.checked,
+      widgetEnabled: elements.widgetEnabled.checked,
+      ui: {
+        settingsCollapsed: uiState.settingsCollapsed,
+        detailsCollapsed: uiState.detailsCollapsed,
+      },
     },
   });
+}
+
+
+async function persistSettingsSilently() {
+  try {
+    await saveSettings();
+  } catch (error) {
+    setStatus(error.message || "Failed to save settings.", "error");
+  }
+}
+
+async function sendMessageToActiveTab(message) {
+  const tab = await getActiveTab();
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tab.id, message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function syncInjectedWidget() {
+  try {
+    await sendMessageToActiveTab({
+      type: "capcapocr_set_widget_enabled",
+      enabled: elements.widgetEnabled.checked,
+    });
+  } catch (error) {
+    setStatus(error.message || "Failed to sync injected widget.", "error");
+  }
+}
+
+function syncPipelineOptions() {
+  const translateEnabled = elements.translateEnabled.checked;
+  const overlayEnabled = elements.overlayEnabled.checked;
+
+  elements.translatorEngine.disabled = !translateEnabled;
+  elements.targetLang.disabled = !translateEnabled;
+
+  if (overlayEnabled && !translateEnabled) {
+    elements.translateEnabled.checked = true;
+    elements.translatorEngine.disabled = false;
+    elements.targetLang.disabled = false;
+  }
+
+  const effectiveTranslateEnabled = elements.translateEnabled.checked;
+  const effectiveOverlayEnabled = elements.overlayEnabled.checked && effectiveTranslateEnabled;
+
+  if (!effectiveTranslateEnabled) {
+    elements.overlayEnabled.checked = false;
+  }
+
+  elements.runButton.textContent = effectiveOverlayEnabled
+    ? "Detect, Translate, Overlay"
+    : effectiveTranslateEnabled
+      ? "Detect, Translate"
+      : "Detect Only";
 }
 
 function syncEngineOptions() {
@@ -291,6 +397,7 @@ async function scanCandidates(tabId) {
 }
 
 function populateCandidates(candidates) {
+  const previousValue = elements.imageCandidate.value;
   currentCandidates = candidates;
   elements.imageCandidate.innerHTML = "";
 
@@ -299,7 +406,7 @@ function populateCandidates(candidates) {
     option.value = "";
     option.textContent = "No visible image candidates";
     elements.imageCandidate.appendChild(option);
-    return;
+    return { selectionChanged: previousValue !== "", selectionLost: previousValue !== "" };
   }
 
   for (const candidate of candidates) {
@@ -308,13 +415,26 @@ function populateCandidates(candidates) {
     option.textContent = `${candidate.kind} ${candidate.width}x${candidate.height} ${imageSourceName(candidate.src)}`;
     elements.imageCandidate.appendChild(option);
   }
+
+  const preserved = candidates.some((candidate) => candidate.id === previousValue);
+  if (preserved) {
+    elements.imageCandidate.value = previousValue;
+  }
+
+  return {
+    selectionChanged: preserved ? false : previousValue !== elements.imageCandidate.value,
+    selectionLost: previousValue !== "" && !preserved,
+  };
 }
 
 async function refreshCandidates() {
   const tab = await getActiveTab();
   setStatus("Scanning page images...", "loading");
   const candidates = await scanCandidates(tab.id);
-  populateCandidates(candidates);
+  const update = populateCandidates(candidates);
+  if (update.selectionChanged || update.selectionLost) {
+    await clearOverlay().catch(() => {});
+  }
   setStatus(
     candidates.length ? `Found ${candidates.length} visible image candidate(s).` : "No visible page images found.",
     candidates.length ? "success" : "error"
@@ -431,6 +551,21 @@ async function renderOverlay(tabId, phase2Payload, candidateId) {
   await runInTab(
     tabId,
     (payload, overlayRootId, selectedId) => {
+      const fitTextToBubble = (container, textNode, boxWidth, boxHeight) => {
+        const maxFontSize = Math.max(12, Math.min(28, Math.floor(Math.min(boxWidth / 5.2, boxHeight / 2.1))));
+        const minFontSize = 8;
+
+        textNode.style.fontSize = `${maxFontSize}px`;
+
+        while (
+          parseFloat(textNode.style.fontSize) > minFontSize &&
+          (textNode.scrollWidth > container.clientWidth || textNode.scrollHeight > container.clientHeight)
+        ) {
+          const nextFontSize = parseFloat(textNode.style.fontSize) - 1;
+          textNode.style.fontSize = `${nextFontSize}px`;
+        }
+      };
+
       const existing = document.getElementById(overlayRootId);
       if (existing) {
         existing.remove();
@@ -480,6 +615,7 @@ async function renderOverlay(tabId, phase2Payload, candidateId) {
         bubble.style.textAlign = "center";
         bubble.style.padding = "2px";
         bubble.style.background = "rgba(255, 255, 255, 0.98)";
+        bubble.style.overflow = "hidden";
         bubble.style.borderRadius = `${Math.max(
           6,
           Math.floor(Math.min(boxWidth, boxHeight) * 0.18)
@@ -493,15 +629,15 @@ async function renderOverlay(tabId, phase2Payload, candidateId) {
         textNode.style.lineHeight = "1.15";
         textNode.style.whiteSpace = "pre-wrap";
         textNode.style.overflowWrap = "break-word";
+        textNode.style.wordBreak = "break-word";
         textNode.style.maxWidth = "100%";
         textNode.style.maxHeight = "100%";
+        textNode.style.overflow = "hidden";
         textNode.style.textShadow =
           "0 0 2px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.95), 0 1px 0 rgba(255,255,255,0.95)";
 
-        const fontSize = Math.max(12, Math.min(28, Math.floor(Math.min(boxWidth / 5.2, boxHeight / 2.1))));
-        textNode.style.fontSize = `${fontSize}px`;
-
         bubble.appendChild(textNode);
+        fitTextToBubble(bubble, textNode, boxWidth - 4, boxHeight - 4);
         root.appendChild(bubble);
       }
 
@@ -509,6 +645,17 @@ async function renderOverlay(tabId, phase2Payload, candidateId) {
     },
     [phase2Payload, OVERLAY_ROOT_ID, candidateId]
   );
+}
+
+function resetOutputs() {
+  elements.joinedText.value = "";
+  elements.overlayText.value = "";
+  elements.rawJson.value = "";
+}
+
+async function toggleSection(section) {
+  setSectionCollapsed(section, !uiState[`${section}Collapsed`]);
+  await saveSettings();
 }
 
 async function clearOverlay() {
@@ -525,17 +672,21 @@ async function clearOverlay() {
 async function runOverlayFlow() {
   const apiUrl = elements.apiUrl.value.trim();
   const phase2Url = elements.phase2Url.value.trim();
-  if (!apiUrl || !phase2Url) {
-    setStatus("OCR and Phase 2 endpoints are required.", "error");
+  const translateEnabled = elements.translateEnabled.checked;
+
+  if (!apiUrl) {
+    setStatus("OCR endpoint is required.", "error");
+    return;
+  }
+  if (translateEnabled && !phase2Url) {
+    setStatus("Phase 2 endpoint is required when Translator is enabled.", "error");
     return;
   }
 
   elements.runButton.disabled = true;
   elements.refreshImagesButton.disabled = true;
   elements.clearButton.disabled = true;
-  elements.joinedText.value = "";
-  elements.overlayText.value = "";
-  elements.rawJson.value = "";
+  resetOutputs();
 
   try {
     await saveSettings();
@@ -558,6 +709,15 @@ async function runOverlayFlow() {
 
     elements.joinedText.value = joinBlockText(ocrPayload.blocks);
 
+    const overlayEnabled = elements.overlayEnabled.checked && translateEnabled;
+
+    if (!translateEnabled) {
+      elements.rawJson.value = JSON.stringify(ocrPayload, null, 2);
+      await clearOverlay().catch(() => {});
+      setStatus(`Detected ${ocrPayload.blocks?.length || 0} text block(s).`, "success");
+      return;
+    }
+
     setStatus("Grouping and translating...", "loading");
     const phase2Payload = await requestJson(
       phase2Url,
@@ -576,6 +736,12 @@ async function runOverlayFlow() {
 
     elements.overlayText.value = joinOverlayText(phase2Payload.groups);
     elements.rawJson.value = JSON.stringify(phase2Payload, null, 2);
+
+    if (!overlayEnabled) {
+      await clearOverlay().catch(() => {});
+      setStatus(`Translated ${phase2Payload.groups?.length || 0} group(s) without overlay.`, "success");
+      return;
+    }
 
     setStatus("Drawing translated overlay...", "loading");
     await renderOverlay(tab.id, phase2Payload, selectedImage.candidateId);
@@ -596,8 +762,48 @@ elements.refreshImagesButton.addEventListener("click", () => {
   refreshCandidates().catch((error) => setStatus(error.message || "Image scan failed.", "error"));
 });
 
-elements.sourceLang.addEventListener("change", syncEngineOptions);
-elements.ocrEngine.addEventListener("change", syncEngineOptions);
+[elements.apiUrl, elements.phase2Url, elements.detectionEngine, elements.targetLang, elements.translatorEngine]
+  .forEach((element) => {
+    element.addEventListener("change", () => {
+      persistSettingsSilently();
+    });
+  });
+
+elements.sourceLang.addEventListener("change", () => {
+  syncEngineOptions();
+  persistSettingsSilently();
+});
+
+elements.ocrEngine.addEventListener("change", () => {
+  syncEngineOptions();
+  persistSettingsSilently();
+});
+
+elements.translateEnabled.addEventListener("change", () => {
+  syncPipelineOptions();
+  persistSettingsSilently();
+});
+
+elements.overlayEnabled.addEventListener("change", () => {
+  syncPipelineOptions();
+  persistSettingsSilently();
+});
+
+elements.widgetEnabled.addEventListener("change", () => {
+  persistSettingsSilently();
+  syncInjectedWidget();
+});
+
+elements.imageCandidate.addEventListener("change", () => {
+  clearOverlay().catch(() => {});
+});
+
+elements.settingsToggle.addEventListener("click", () => {
+  toggleSection("settings").catch((error) => setStatus(error.message || "Failed to save section state.", "error"));
+});
+elements.detailsToggle.addEventListener("click", () => {
+  toggleSection("details").catch((error) => setStatus(error.message || "Failed to save section state.", "error"));
+});
 elements.runButton.addEventListener("click", runOverlayFlow);
 
 elements.clearButton.addEventListener("click", async () => {
@@ -612,8 +818,11 @@ elements.clearButton.addEventListener("click", async () => {
   }
 });
 
-Promise.all([loadSettings(), refreshCandidates()]).catch((error) => {
-  setStatus(error.message || "Failed to initialize popup.", "error");
-});
+Promise.all([loadSettings(), refreshCandidates()])
+  .then(() => syncInjectedWidget())
+  .catch((error) => {
+    setStatus(error.message || "Failed to initialize popup.", "error");
+  });
 
 syncEngineOptions();
+syncPipelineOptions();

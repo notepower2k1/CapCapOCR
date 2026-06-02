@@ -92,23 +92,41 @@ def _group_sort_key(group: TextGroup) -> tuple[int, int]:
 
 
 def _should_join_group(cluster: list[TextBlock], candidate: TextBlock) -> bool:
-    cluster_bbox = _union_bbox([block.bbox for block in cluster])
     candidate_rect = _rect_from_bbox(candidate.bbox)
-    cluster_rect = _rect_from_bbox(cluster_bbox)
-    cluster_height = max(cluster_rect[3] - cluster_rect[1], 1)
-    cluster_width = max(cluster_rect[2] - cluster_rect[0], 1)
-    candidate_height = max(candidate_rect[3] - candidate_rect[1], 1)
-    candidate_width = max(candidate_rect[2] - candidate_rect[0], 1)
+    cluster_rects = [_rect_from_bbox(block.bbox) for block in cluster]
 
-    vertical_bias = cluster_height >= cluster_width
+    if not any(_rects_are_neighbors(cluster_rect, candidate_rect) for cluster_rect in cluster_rects):
+        return False
+
+    cluster_bbox = _union_bbox([block.bbox for block in cluster])
+    proposed_bbox = _union_bbox([cluster_bbox, candidate.bbox])
+    proposed_rect = _rect_from_bbox(proposed_bbox)
+    proposed_area = max(_rect_area(proposed_rect), 1)
+    covered_area = sum(_rect_area(cluster_rect) for cluster_rect in cluster_rects) + _rect_area(candidate_rect)
+    coverage_ratio = covered_area / proposed_area
+    return coverage_ratio >= 0.38
+
+
+def _rects_are_neighbors(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    width_a = max(a[2] - a[0], 1)
+    height_a = max(a[3] - a[1], 1)
+    width_b = max(b[2] - b[0], 1)
+    height_b = max(b[3] - b[1], 1)
+    vertical_bias = (height_a + height_b) >= (width_a + width_b)
+
+    gap_x = _rect_gap_x(a, b)
+    gap_y = _rect_gap_y(a, b)
+    overlap_x = _rect_overlap_x(a, b)
+    overlap_y = _rect_overlap_y(a, b)
+
     if vertical_bias:
-        gap_x = _rect_gap_x(cluster_rect, candidate_rect)
-        overlap_y = _rect_overlap_y(cluster_rect, candidate_rect)
-        return gap_x <= max(cluster_width, candidate_width) * 1.1 and overlap_y >= min(cluster_height, candidate_height) * 0.18
+        same_column = gap_x == 0 and gap_y <= min(height_a, height_b) * 0.35
+        nearby_columns = gap_x <= max(width_a, width_b) * 0.75 and overlap_y >= min(height_a, height_b) * 0.35
+        return same_column or nearby_columns
 
-    gap_y = _rect_gap_y(cluster_rect, candidate_rect)
-    overlap_x = _rect_overlap_x(cluster_rect, candidate_rect)
-    return gap_y <= max(cluster_height, candidate_height) * 1.1 and overlap_x >= min(cluster_width, candidate_width) * 0.18
+    same_row = gap_y == 0 and gap_x <= min(width_a, width_b) * 0.35
+    nearby_rows = gap_y <= max(height_a, height_b) * 0.75 and overlap_x >= min(width_a, width_b) * 0.35
+    return same_row or nearby_rows
 
 
 def _union_bbox(bboxes: list[list[list[int]]]) -> list[list[int]]:
@@ -126,6 +144,10 @@ def _rect_from_bbox(bbox: list[list[int]]) -> tuple[int, int, int, int]:
     xs = [point[0] for point in bbox]
     ys = [point[1] for point in bbox]
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def _rect_area(rect: tuple[int, int, int, int]) -> int:
+    return max(0, rect[2] - rect[0]) * max(0, rect[3] - rect[1])
 
 
 def _rect_gap_x(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
