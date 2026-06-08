@@ -208,6 +208,39 @@ button:disabled {
   font-size: 0.92rem;
 }
 
+.bubble-reader {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(102, 67, 45, 0.18);
+  background: rgba(255, 252, 247, 0.92);
+}
+
+.bubble-reader-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.bubble-reader-head strong {
+  font-size: 0.96rem;
+}
+
+.bubble-reader-head span {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.bubble-reader-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 600 0.98rem/1.5 "Segoe UI", sans-serif;
+  color: var(--text);
+}
+
 .sidebar {
   display: flex;
   flex-direction: column;

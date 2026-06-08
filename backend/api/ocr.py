@@ -82,13 +82,14 @@ async def run_phase2(request: Phase2Request) -> Phase2Response:
         translation_enabled = (
             request.translate
             and translator.is_configured(request.translator_engine)
-            and request.source_lang == "ja"
+            and request.source_lang in {"ja", "zh"}
         )
         if translation_enabled:
             grouped = await translator.translate_groups(
                 grouped,
                 request.target_lang,
                 request.translator_engine,
+                request.source_lang,
             )
         return Phase2Response(
             image=request.image,

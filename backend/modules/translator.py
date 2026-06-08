@@ -33,14 +33,19 @@ class GeminiApiTranslator:
     def is_configured(self) -> bool:
         return bool(self.api_key)
 
-    async def translate_groups(self, groups: list[TextGroup], target_lang: str = "en") -> list[TextGroup]:
+    async def translate_groups(
+        self,
+        groups: list[TextGroup],
+        target_lang: str = "en",
+        source_lang: str = "ja",
+    ) -> list[TextGroup]:
         if not self.api_key:
             raise OCRDependencyError("Set GEMINI_API_KEY to enable API translation.")
 
         translated_groups: list[TextGroup] = []
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             for group in groups:
-                result = await self._translate_single_group(client, group.source_text, target_lang)
+                result = await self._translate_single_group(client, group.source_text, target_lang, source_lang)
                 translated_groups.append(
                     group.model_copy(
                         update={
@@ -56,13 +61,15 @@ class GeminiApiTranslator:
         client: httpx.AsyncClient,
         text: str,
         target_lang: str,
+        source_lang: str,
     ) -> TranslationResult:
         language_name = _language_name(target_lang)
+        source_language_name = _source_language_name(source_lang)
         payload = {
             "systemInstruction": {
                 "parts": [
                     {
-                        "text": _translation_instruction(language_name)
+                        "text": _translation_instruction(source_language_name, language_name)
                     }
                 ]
             },
@@ -117,11 +124,16 @@ class GoogleTranslateTranslator:
     def is_configured(self) -> bool:
         return True
 
-    async def translate_groups(self, groups: list[TextGroup], target_lang: str = "en") -> list[TextGroup]:
+    async def translate_groups(
+        self,
+        groups: list[TextGroup],
+        target_lang: str = "en",
+        source_lang: str = "ja",
+    ) -> list[TextGroup]:
         translated_groups: list[TextGroup] = []
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             for group in groups:
-                result = await self._translate_single_group(client, group.source_text, target_lang)
+                result = await self._translate_single_group(client, group.source_text, target_lang, source_lang)
                 translated_groups.append(
                     group.model_copy(
                         update={
@@ -137,6 +149,7 @@ class GoogleTranslateTranslator:
         client: httpx.AsyncClient,
         text: str,
         target_lang: str,
+        source_lang: str,
     ) -> TranslationResult:
         if not text.strip():
             return TranslationResult(corrected_japanese="", translated_text="")
@@ -146,7 +159,7 @@ class GoogleTranslateTranslator:
                 self.api_url,
                 params={
                     "client": "gtx",
-                    "sl": "ja",
+                    "sl": _google_source_lang(source_lang),
                     "tl": target_lang,
                     "dt": "t",
                     "q": text,
@@ -199,7 +212,12 @@ class LocalGemmaTranslator:
     def is_configured(self) -> bool:
         return self.model_path.exists()
 
-    async def translate_groups(self, groups: list[TextGroup], target_lang: str = "en") -> list[TextGroup]:
+    async def translate_groups(
+        self,
+        groups: list[TextGroup],
+        target_lang: str = "en",
+        source_lang: str = "ja",
+    ) -> list[TextGroup]:
         if not self.is_configured():
             raise OCRDependencyError(
                 f"Local translator model not found at `{self.model_path}`."
@@ -207,7 +225,7 @@ class LocalGemmaTranslator:
 
         translated_groups: list[TextGroup] = []
         for group in groups:
-            result = await asyncio.to_thread(self._translate_single_group, group.source_text, target_lang)
+            result = await asyncio.to_thread(self._translate_single_group, group.source_text, target_lang, source_lang)
             translated_groups.append(
                 group.model_copy(
                     update={
@@ -218,17 +236,18 @@ class LocalGemmaTranslator:
             )
         return translated_groups
 
-    def _translate_single_group(self, text: str, target_lang: str) -> TranslationResult:
+    def _translate_single_group(self, text: str, target_lang: str, source_lang: str) -> TranslationResult:
         if not text.strip():
             return TranslationResult(corrected_japanese="", translated_text="")
 
         model = self._get_model()
         language_name = _language_name(target_lang)
+        source_language_name = _source_language_name(source_lang)
         try:
             response = model.create_chat_completion(
                 messages=[
-                    {"role": "system", "content": _translation_instruction(language_name)},
-                    {"role": "user", "content": f"Target language: {language_name}\n\n{text}"},
+                    {"role": "system", "content": _translation_instruction(source_language_name, language_name)},
+                    {"role": "user", "content": f"Source language: {source_language_name}\nTarget language: {language_name}\n\n{text}"},
                 ],
                 temperature=self.temperature,
                 top_p=self.top_p,
@@ -317,21 +336,22 @@ class GemmaTranslator:
         groups: list[TextGroup],
         target_lang: str = "en",
         translator_engine: str = "local",
+        source_lang: str = "ja",
     ) -> list[TextGroup]:
         engine = self._resolve_engine(translator_engine)
         if engine == "local":
-            return await self._local.translate_groups(groups, target_lang)
+            return await self._local.translate_groups(groups, target_lang, source_lang)
         if engine == "api":
-            return await self._api.translate_groups(groups, target_lang)
+            return await self._api.translate_groups(groups, target_lang, source_lang)
         if engine == "google":
-            return await self._google.translate_groups(groups, target_lang)
+            return await self._google.translate_groups(groups, target_lang, source_lang)
 
         if self._local.is_configured():
-            return await self._local.translate_groups(groups, target_lang)
+            return await self._local.translate_groups(groups, target_lang, source_lang)
         if self._api.is_configured():
-            return await self._api.translate_groups(groups, target_lang)
+            return await self._api.translate_groups(groups, target_lang, source_lang)
         if self._google.is_configured():
-            return await self._google.translate_groups(groups, target_lang)
+            return await self._google.translate_groups(groups, target_lang, source_lang)
         raise OCRDependencyError("No translation engine is configured.")
 
     def _resolve_engine(self, translator_engine: str) -> str:
@@ -359,8 +379,12 @@ def _parse_translation_content(source_text: str, content: str) -> TranslationRes
     jp = source_text.strip()
     translated = ""
     for line in content.splitlines():
-        if line.startswith("JP:"):
+        if line.startswith("SRC:"):
+            jp = line.removeprefix("SRC:").strip()
+        elif line.startswith("JP:"):
             jp = line.removeprefix("JP:").strip()
+        elif line.startswith("ZH:"):
+            jp = line.removeprefix("ZH:").strip()
         elif line.startswith("TR:"):
             translated = line.removeprefix("TR:").strip()
         elif line.startswith("EN:") and not translated:
@@ -368,14 +392,34 @@ def _parse_translation_content(source_text: str, content: str) -> TranslationRes
     return TranslationResult(corrected_japanese=jp, translated_text=translated)
 
 
-def _translation_instruction(language_name: str) -> str:
+def _translation_instruction(source_language_name: str, target_language_name: str) -> str:
     return (
-        "You are a Japanese manga OCR correction and translation engine. "
-        "Minimally correct OCR mistakes in the provided Japanese text, then translate it. "
+        f"You are a {source_language_name} manga OCR correction and translation engine. "
+        f"Minimally correct OCR mistakes in the provided {source_language_name} text, then translate it. "
         "Be conservative. Do not invent story context. Preserve names, punctuation, ellipses, emphasis, and ambiguity when possible. "
-        "If the OCR text already looks valid, keep the Japanese almost unchanged. "
-        f"Return exactly two lines and nothing else: 'JP: <corrected japanese>' and 'TR: <{language_name} translation>'."
+        f"If the OCR text already looks valid, keep the {source_language_name} almost unchanged. "
+        f"Return exactly two lines and nothing else: 'SRC: <corrected source text>' and 'TR: <{target_language_name} translation>'."
     )
+
+
+def _source_language_name(source_lang: str) -> str:
+    normalized = source_lang.strip().lower()
+    return {
+        "ja": "Japanese",
+        "zh": "Chinese",
+        "zh-cn": "Simplified Chinese",
+        "zh-tw": "Traditional Chinese",
+    }.get(normalized, "Japanese")
+
+
+def _google_source_lang(source_lang: str) -> str:
+    normalized = source_lang.strip().lower()
+    return {
+        "ja": "ja",
+        "zh": "zh-CN",
+        "zh-cn": "zh-CN",
+        "zh-tw": "zh-TW",
+    }.get(normalized, "ja")
 
 
 def _language_name(target_lang: str) -> str:

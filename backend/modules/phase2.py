@@ -57,11 +57,13 @@ def _group_from_blocks(group_id: int, blocks: list[TextBlock]) -> TextGroup:
         [min_x, max_y],
     ]
     combined_text = "\n".join(block.text.strip() for block in blocks if block.text.strip())
+    mask = _select_group_mask(blocks)
 
     return TextGroup(
         id=group_id,
         block_ids=[block.id for block in blocks],
         bbox=bbox,
+        mask=mask,
         x=min_x,
         y=min_y,
         width=max_x - min_x,
@@ -71,6 +73,23 @@ def _group_from_blocks(group_id: int, blocks: list[TextBlock]) -> TextGroup:
         corrected_text=combined_text,
         translated_text="",
     )
+
+
+def _select_group_mask(blocks: list[TextBlock]) -> list[list[int]]:
+    masks = [block.mask for block in blocks if getattr(block, "mask", None)]
+    if not masks:
+        return []
+    return max(masks, key=_polygon_area)
+
+
+def _polygon_area(polygon: list[list[int]]) -> int:
+    if len(polygon) < 3:
+        return 0
+    area = 0
+    for index, point in enumerate(polygon):
+        next_point = polygon[(index + 1) % len(polygon)]
+        area += point[0] * next_point[1] - next_point[0] * point[1]
+    return abs(area) // 2
 
 
 def _block_sort_key(block: TextBlock) -> tuple[int, int]:

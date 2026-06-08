@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from threading import Lock
 from typing import Any
+import math
 
 from backend.modules.errors import OCRDependencyError, OCRError
 
@@ -78,7 +79,7 @@ class BubbleDetector:
             if points is None or len(points) < 3:
                 continue
             contour = [[int(round(x)), int(round(y))] for x, y in points]
-            polygons.append(self._rectify_polygon(contour))
+            polygons.append(self._simplify_polygon(contour))
         return polygons
 
     def _extract_boxes(self, result: Any) -> list[list[list[int]]]:
@@ -101,12 +102,39 @@ class BubbleDetector:
             )
         return polygons
 
-    def _rectify_polygon(self, contour: list[list[int]]) -> list[list[int]]:
-        xs = [point[0] for point in contour]
-        ys = [point[1] for point in contour]
-        return [
-            [min(xs), min(ys)],
-            [max(xs), min(ys)],
-            [max(xs), max(ys)],
-            [min(xs), max(ys)],
-        ]
+    def _simplify_polygon(self, contour: list[list[int]], max_points: int = 24) -> list[list[int]]:
+        deduped: list[list[int]] = []
+        for point in contour:
+            if not deduped or deduped[-1] != point:
+                deduped.append(point)
+
+        if len(deduped) <= max_points:
+            return deduped
+
+        perimeter = self._polygon_perimeter(deduped)
+        epsilon = max(perimeter * 0.01, 2.0)
+
+        try:
+            import cv2
+            import numpy as np
+
+            array = np.array(deduped, dtype=np.int32).reshape((-1, 1, 2))
+            approximated = cv2.approxPolyDP(array, epsilon, True).reshape((-1, 2)).tolist()
+            simplified = [[int(x), int(y)] for x, y in approximated]
+            if len(simplified) >= 3 and len(simplified) <= max_points:
+                return simplified
+        except Exception:
+            pass
+
+        step = math.ceil(len(deduped) / max_points)
+        sampled = deduped[::step]
+        return sampled if len(sampled) >= 3 else deduped[:max_points]
+
+    def _polygon_perimeter(self, contour: list[list[int]]) -> float:
+        if len(contour) < 2:
+            return 0.0
+        total = 0.0
+        for index, point in enumerate(contour):
+            next_point = contour[(index + 1) % len(contour)]
+            total += math.dist(point, next_point)
+        return total

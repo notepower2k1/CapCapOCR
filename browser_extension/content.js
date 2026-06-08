@@ -1,4 +1,5 @@
 const OVERLAY_ROOT_ID = "__capcapocr_overlay_root__";
+const OVERLAY_READER_ID = "__capcapocr_overlay_reader__";
 const STORAGE_KEY = "capcapocr_test_settings";
 const WIDGET_ID = "__capcapocr_quick_actions__";
 const STYLE_ID = "__capcapocr_quick_actions_style__";
@@ -234,6 +235,40 @@ function scanCandidates() {
 
 function removeOverlay() {
   document.getElementById(OVERLAY_ROOT_ID)?.remove();
+  document.getElementById(OVERLAY_READER_ID)?.remove();
+}
+
+function showOverlayReader(text) {
+  let reader = document.getElementById(OVERLAY_READER_ID);
+  if (!reader) {
+    reader = document.createElement("div");
+    reader.id = OVERLAY_READER_ID;
+    reader.style.position = "fixed";
+    reader.style.left = "50%";
+    reader.style.bottom = "88px";
+    reader.style.transform = "translateX(-50%)";
+    reader.style.width = "min(680px, calc(100vw - 32px))";
+    reader.style.maxHeight = "38vh";
+    reader.style.padding = "14px 16px";
+    reader.style.borderRadius = "18px";
+    reader.style.background = "rgba(255, 251, 245, 0.98)";
+    reader.style.border = "1px solid rgba(130, 98, 74, 0.24)";
+    reader.style.boxShadow = "0 16px 40px rgba(0, 0, 0, 0.22)";
+    reader.style.backdropFilter = "blur(14px)";
+    reader.style.color = "#2b211d";
+    reader.style.font = "600 15px/1.5 'Segoe UI', sans-serif";
+    reader.style.whiteSpace = "pre-wrap";
+    reader.style.wordBreak = "break-word";
+    reader.style.overflow = "auto";
+    reader.style.zIndex = "2147483647";
+    reader.style.cursor = "pointer";
+    reader.title = "Click to close";
+    reader.addEventListener("click", () => {
+      reader.remove();
+    });
+    document.documentElement.appendChild(reader);
+  }
+  reader.textContent = text;
 }
 
 function delay(ms) {
@@ -336,16 +371,64 @@ async function requestJson(url, body, errorPrefix) {
 }
 
 function renderOverlay(payload, selectedId) {
-  const fitTextToBubble = (container, textNode, boxWidth, boxHeight) => {
-    const maxFontSize = Math.max(12, Math.min(28, Math.floor(Math.min(boxWidth / 5.2, boxHeight / 2.1))));
-    const minFontSize = 8;
-    textNode.style.fontSize = `${maxFontSize}px`;
-    while (
-      parseFloat(textNode.style.fontSize) > minFontSize &&
-      (textNode.scrollWidth > container.clientWidth || textNode.scrollHeight > container.clientHeight)
-    ) {
-      textNode.style.fontSize = `${parseFloat(textNode.style.fontSize) - 1}px`;
+  const polygonBounds = (polygon) => {
+    if (!polygon || polygon.length < 3) {
+      return null;
     }
+    const xs = polygon.map((point) => point[0]);
+    const ys = polygon.map((point) => point[1]);
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      width: Math.max(...xs) - Math.min(...xs),
+      height: Math.max(...ys) - Math.min(...ys),
+    };
+  };
+
+  const polygonClipPath = (polygon, bounds, inset) => {
+    if (!polygon || polygon.length < 3 || !bounds) {
+      return "";
+    }
+    const centerX = bounds.x + bounds.width / 2;
+    const centerY = bounds.y + bounds.height / 2;
+    const adjusted = polygon.map(([x, y]) => {
+      const dx = x - centerX;
+      const dy = y - centerY;
+      const length = Math.hypot(dx, dy) || 1;
+      const nextLength = Math.max(length - inset, 1);
+      const nextX = centerX + (dx / length) * nextLength;
+      const nextY = centerY + (dy / length) * nextLength;
+      const px = ((nextX - bounds.x) / Math.max(bounds.width, 1)) * 100;
+      const py = ((nextY - bounds.y) / Math.max(bounds.height, 1)) * 100;
+      return `${px}% ${py}%`;
+    });
+    return `polygon(${adjusted.join(", ")})`;
+  };
+
+  const fitTextToBubble = (container, textNode, boxWidth, boxHeight) => {
+    const minFontSize = 9;
+    const maxFontSize = Math.max(
+      minFontSize,
+      Math.min(28, Math.floor(Math.min(boxWidth / 4.8, boxHeight / 1.95)))
+    );
+    let low = minFontSize;
+    let high = maxFontSize;
+    let best = minFontSize;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      textNode.style.fontSize = `${mid}px`;
+      textNode.style.lineHeight = "1.16";
+      if (textNode.scrollWidth <= container.clientWidth && textNode.scrollHeight <= container.clientHeight) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    textNode.style.fontSize = `${best}px`;
+    textNode.style.lineHeight = "1.16";
   };
 
   removeOverlay();
@@ -376,28 +459,45 @@ function renderOverlay(payload, selectedId) {
     if (!text) continue;
 
     const bubble = document.createElement("div");
-    const boxWidth = Math.max(24, Math.round((group.width || 0) * scaleX));
-    const boxHeight = Math.max(24, Math.round((group.height || 0) * scaleY));
+    const maskBounds = polygonBounds(group.mask);
+    const rawX = maskBounds ? Math.round(maskBounds.x * scaleX) : Math.round((group.x || 0) * scaleX);
+    const rawY = maskBounds ? Math.round(maskBounds.y * scaleY) : Math.round((group.y || 0) * scaleY);
+    const rawWidth = Math.max(24, maskBounds ? Math.round(maskBounds.width * scaleX) : Math.round((group.width || 0) * scaleX));
+    const rawHeight = Math.max(24, maskBounds ? Math.round(maskBounds.height * scaleY) : Math.round((group.height || 0) * scaleY));
+    const inset = Math.max(2, Math.floor(Math.min(rawWidth, rawHeight) * 0.045));
+    const boxWidth = Math.max(20, rawWidth - inset * 2);
+    const boxHeight = Math.max(20, rawHeight - inset * 2);
+    const padding = Math.max(4, Math.floor(Math.min(boxWidth, boxHeight) * 0.09));
     bubble.style.position = "absolute";
-    bubble.style.left = `${Math.round((group.x || 0) * scaleX)}px`;
-    bubble.style.top = `${Math.round((group.y || 0) * scaleY)}px`;
+    bubble.style.left = `${rawX + inset}px`;
+    bubble.style.top = `${rawY + inset}px`;
     bubble.style.width = `${boxWidth}px`;
     bubble.style.height = `${boxHeight}px`;
     bubble.style.display = "flex";
     bubble.style.alignItems = "center";
     bubble.style.justifyContent = "center";
     bubble.style.textAlign = "center";
-    bubble.style.padding = "2px";
+    bubble.style.padding = `${padding}px`;
     bubble.style.background = "rgba(255, 255, 255, 0.98)";
     bubble.style.overflow = "hidden";
-    bubble.style.borderRadius = `${Math.max(6, Math.floor(Math.min(boxWidth, boxHeight) * 0.18))}px`;
+    bubble.style.borderRadius = `${Math.max(6, Math.floor(Math.min(boxWidth, boxHeight) * 0.22))}px`;
+    bubble.style.pointerEvents = "auto";
+    bubble.style.cursor = "pointer";
+    if (maskBounds) {
+      bubble.style.clipPath = polygonClipPath(
+        group.mask.map(([x, y]) => [x * scaleX, y * scaleY]),
+        { x: rawX, y: rawY, width: rawWidth, height: rawHeight },
+        inset
+      );
+      bubble.style.borderRadius = "0";
+    }
 
     const textNode = document.createElement("div");
     textNode.textContent = text;
     textNode.style.color = "#111111";
     textNode.style.fontFamily = "'Segoe UI', sans-serif";
     textNode.style.fontWeight = "700";
-    textNode.style.lineHeight = "1.15";
+    textNode.style.lineHeight = "1.16";
     textNode.style.whiteSpace = "pre-wrap";
     textNode.style.overflowWrap = "break-word";
     textNode.style.wordBreak = "break-word";
@@ -407,7 +507,17 @@ function renderOverlay(payload, selectedId) {
     textNode.style.textShadow = "0 0 2px rgba(255,255,255,0.95), 0 0 6px rgba(255,255,255,0.95), 0 1px 0 rgba(255,255,255,0.95)";
 
     bubble.appendChild(textNode);
-    fitTextToBubble(bubble, textNode, boxWidth - 4, boxHeight - 4);
+    fitTextToBubble(bubble, textNode, boxWidth - padding * 2, boxHeight - padding * 2);
+    bubble.title = text;
+    bubble.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      showOverlayReader(text);
+    });
+    bubble.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     root.appendChild(bubble);
   }
 

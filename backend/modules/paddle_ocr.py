@@ -48,14 +48,14 @@ class OCRConfig:
 class OCREngine:
     def __init__(self, config: OCRConfig | None = None) -> None:
         self.config = config or OCRConfig()
-        self._ocr_instance: Any | None = None
+        self._ocr_instances: dict[str, Any] = {}
         self._manga_ocr = MangaOCRRecognizer()
         self._gguf_ocr = GGUFMangaOCRRecognizer()
         self._bubble_detector = BubbleDetector()
 
-    def _get_instance(self) -> Any:
-        if self._ocr_instance is not None:
-            return self._ocr_instance
+    def _get_instance(self, paddle_lang: str) -> Any:
+        if paddle_lang in self._ocr_instances:
+            return self._ocr_instances[paddle_lang]
 
         try:
             # Preload torch before PaddleOCR on Windows to avoid a transient
@@ -69,9 +69,9 @@ class OCREngine:
             ) from exc
 
         try:
-            self._ocr_instance = PaddleOCR(
+            instance = PaddleOCR(
                 use_angle_cls=self.config.use_angle_cls,
-                lang=self.config.lang,
+                lang=paddle_lang,
                 show_log=False,
                 enable_mkldnn=False,
             )
@@ -81,7 +81,8 @@ class OCREngine:
                 "for the Paddle stack in this project."
             ) from exc
 
-        return self._ocr_instance
+        self._ocr_instances[paddle_lang] = instance
+        return instance
 
     def process_image(
         self,
@@ -95,14 +96,15 @@ class OCREngine:
         except ValueError as exc:
             raise OCRError(str(exc)) from exc
 
-        if source_lang not in {"ja", "auto"}:
-            raise OCRError("`source_lang` must be `ja` or `auto`.")
+        if source_lang not in {"ja", "zh", "auto"}:
+            raise OCRError("`source_lang` must be `ja`, `zh`, or `auto`.")
 
         mode = self._resolve_ocr_engine(source_lang=source_lang, ocr_engine=ocr_engine)
         detection_mode = self._resolve_detection_engine(
             source_lang=source_lang,
             detection_engine=detection_engine,
         )
+        paddle_lang = self._resolve_paddle_lang(source_lang)
 
         try:
             if mode == "gguf":
@@ -110,6 +112,7 @@ class OCREngine:
                     image_array=image_array,
                     recognizer="gguf",
                     detection_engine=detection_mode,
+                    paddle_lang=paddle_lang,
                 )
                 if not blocks:
                     blocks = self._recognize_with_gguf(image_array)
@@ -120,14 +123,20 @@ class OCREngine:
                     image_array=image_array,
                     recognizer="manga",
                     detection_engine=detection_mode,
+                    paddle_lang=paddle_lang,
                 )
                 return OCRResponse(image=ImageMeta(width=width, height=height), blocks=blocks)
 
             if detection_mode == "bubble":
-                raise OCRError("`ocr_engine=paddle` does not support `detection_engine=bubble`.")
+                blocks = self._detect_bubbles_with_paddle(
+                    image_array=image_array,
+                    paddle_lang=paddle_lang,
+                )
+                return OCRResponse(image=ImageMeta(width=width, height=height), blocks=blocks)
 
             raw_result = self._run_paddle_ocr(
                 image_array,
+                paddle_lang=paddle_lang,
                 cls=True,
             )
         except Exception as exc:  # pragma: no cover - Paddle runtime errors vary
@@ -153,21 +162,24 @@ class OCREngine:
         normalized = detection_engine.strip().lower()
         if normalized not in {"text", "bubble"}:
             raise OCRError("`detection_engine` must be `text` or `bubble`.")
-        if normalized == "bubble" and source_lang != "ja":
-            raise OCRError("`detection_engine=bubble` requires `source_lang=ja`.")
         return normalized
+
+    def _resolve_paddle_lang(self, source_lang: str) -> str:
+        return "japan" if source_lang == "ja" else "ch"
 
     def _detect_and_recognize(
         self,
         image_array: Any,
         recognizer: str,
         detection_engine: str,
+        paddle_lang: str,
     ) -> list[TextBlock]:
         if detection_engine == "bubble":
-            return self._detect_bubbles_and_recognize(image_array, recognizer=recognizer)
+            return self._detect_bubbles_and_recognize(image_array, recognizer=recognizer, paddle_lang=paddle_lang)
 
         raw_result = self._run_paddle_ocr(
             image_array,
+            paddle_lang=paddle_lang,
             det=True,
             rec=False,
             cls=True,
@@ -197,7 +209,12 @@ class OCREngine:
             )
         ]
 
-    def _parse_full_result(self, raw_result: Any) -> list[TextBlock]:
+    def _parse_full_result(
+        self,
+        raw_result: Any,
+        offset_x: int = 0,
+        offset_y: int = 0,
+    ) -> list[TextBlock]:
         if not raw_result:
             return []
 
@@ -217,6 +234,8 @@ class OCREngine:
                 confidence = float(recognition[1]) if len(recognition) > 1 else 0.0
 
             bbox = normalize_bbox(bbox_points)
+            if offset_x or offset_y:
+                bbox = [[point[0] + offset_x, point[1] + offset_y] for point in bbox]
             blocks.append(
                 TextBlock(
                     id=index,
@@ -287,14 +306,17 @@ class OCREngine:
         self,
         image_array: Any,
         recognizer: str,
+        paddle_lang: str,
     ) -> list[TextBlock]:
-        bubble_bboxes = self._bubble_detector.detect(image_array)
-        if not bubble_bboxes:
+        bubble_polygons = self._bubble_detector.detect(image_array)
+        if not bubble_polygons:
             return []
 
-        text_boxes: list[list[list[int]]] = []
-        for bubble_bbox in bubble_bboxes:
-            rect = rect_from_bbox(bubble_bbox)
+        blocks: list[TextBlock] = []
+        next_id = 1
+
+        for bubble_polygon in bubble_polygons:
+            rect = rect_from_bbox(bubble_polygon)
             left, top, right, bottom = rect
             if right <= left or bottom <= top:
                 continue
@@ -305,20 +327,64 @@ class OCREngine:
 
             raw_result = self._run_paddle_ocr(
                 bubble_crop,
+                paddle_lang=paddle_lang,
                 det=True,
                 rec=False,
                 cls=True,
             )
             local_boxes = self._extract_detection_boxes(raw_result)
+            shifted_boxes: list[list[list[int]]] = []
             for bbox in local_boxes:
                 shifted = [[point[0] + left, point[1] + top] for point in bbox]
                 if rect_intersection_area(rect_from_bbox(shifted), rect) > 0:
-                    text_boxes.append(shifted)
+                    shifted_boxes.append(shifted)
 
-        if not text_boxes:
+            if not shifted_boxes:
+                continue
+
+            bubble_blocks = self._parse_detection_boxes(image_array, shifted_boxes, recognizer=recognizer)
+            for block in bubble_blocks:
+                block.id = next_id
+                block.mask = bubble_polygon
+                next_id += 1
+            blocks.extend(bubble_blocks)
+
+        return blocks
+
+    def _detect_bubbles_with_paddle(
+        self,
+        image_array: Any,
+        paddle_lang: str,
+    ) -> list[TextBlock]:
+        bubble_polygons = self._bubble_detector.detect(image_array)
+        if not bubble_polygons:
             return []
 
-        return self._parse_detection_boxes(image_array, text_boxes, recognizer=recognizer)
+        blocks: list[TextBlock] = []
+        next_id = 1
+
+        for bubble_polygon in bubble_polygons:
+            left, top, right, bottom = rect_from_bbox(bubble_polygon)
+            if right <= left or bottom <= top:
+                continue
+
+            bubble_crop = image_array[top:bottom, left:right]
+            if bubble_crop.size == 0:
+                continue
+
+            raw_result = self._run_paddle_ocr(
+                bubble_crop,
+                paddle_lang=paddle_lang,
+                cls=True,
+            )
+            bubble_blocks = self._parse_full_result(raw_result, offset_x=left, offset_y=top)
+            for block in bubble_blocks:
+                block.id = next_id
+                block.mask = bubble_polygon
+                next_id += 1
+            blocks.extend(bubble_blocks)
+
+        return blocks
 
     def _parse_detection_boxes(
         self,
@@ -692,10 +758,10 @@ class OCREngine:
     def _count_japanese_chars(self, text: str) -> int:
         return sum(1 for char in text if re.match(r"[ぁ-んァ-ン一-龯々ー]", char))
 
-    def _recognize_with_paddle_crop(self, crop_image: Any) -> tuple[str, float]:
+    def _recognize_with_paddle_crop(self, crop_image: Any, paddle_lang: str = "japan") -> tuple[str, float]:
         try:
             bgr = cv2.cvtColor(np.array(crop_image), cv2.COLOR_RGB2BGR)
-            result = self._run_paddle_ocr(bgr, det=False, rec=True, cls=False)
+            result = self._run_paddle_ocr(bgr, paddle_lang=paddle_lang, det=False, rec=True, cls=False)
         except Exception:
             return ("", 0.0)
 
@@ -721,15 +787,15 @@ class OCREngine:
             return True
         return len(whole_text) >= len(merged_text) + 6
 
-    def _run_paddle_ocr(self, image: Any, **kwargs: Any) -> Any:
-        ocr = self._get_instance()
+    def _run_paddle_ocr(self, image: Any, paddle_lang: str = "japan", **kwargs: Any) -> Any:
+        ocr = self._get_instance(paddle_lang)
         try:
             return ocr.ocr(image, **kwargs)
         except Exception as exc:
             if not self._should_reset_paddle(exc):
                 raise
-            self._ocr_instance = None
-            return self._get_instance().ocr(image, **kwargs)
+            self._ocr_instances.pop(paddle_lang, None)
+            return self._get_instance(paddle_lang).ocr(image, **kwargs)
 
     def _should_reset_paddle(self, exc: Exception) -> bool:
         message = str(exc).lower()

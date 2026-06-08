@@ -46,6 +46,10 @@ const elements = {
   zoomLabel: document.getElementById("zoomLabel"),
   showBlocksButton: document.getElementById("showBlocksButton"),
   showGroupsButton: document.getElementById("showGroupsButton"),
+  bubbleReader: document.getElementById("bubbleReader"),
+  bubbleReaderTitle: document.getElementById("bubbleReaderTitle"),
+  bubbleReaderMeta: document.getElementById("bubbleReaderMeta"),
+  bubbleReaderText: document.getElementById("bubbleReaderText"),
 };
 
 const ctx = elements.previewCanvas.getContext("2d");
@@ -178,73 +182,203 @@ function drawGroupOverlay() {
       return;
     }
 
-    const x = group.x || group.bbox?.[0]?.[0] || 0;
-    const y = group.y || group.bbox?.[0]?.[1] || 0;
-    const width = Math.max(group.width || 0, 24 / state.zoom);
-    const height = Math.max(group.height || 0, 24 / state.zoom);
-    const padding = 4 / state.zoom;
-    const fontSize = Math.max(
-      10 / state.zoom,
-      Math.min(
-        state.overlayFontSize / state.zoom,
-        width / 5.2,
-        height / 2.2,
-      ),
-    );
-    const lineHeight = fontSize * 1.12;
-    const maxWidth = Math.max(width - padding * 2, fontSize * 2);
-    const maxLines = Math.max(Math.floor((height - padding * 2) / lineHeight), 1);
-    const lines = wrapCanvasText(ctx, group.translated_text, maxWidth, maxLines);
-    const textHeight = lines.length * lineHeight;
-    const startY = y + Math.max((height - textHeight) / 2, 0);
-    const radius = Math.min(width, height) * 0.16;
+    const maskBounds = getPolygonBounds(group.mask);
+    const rawX = maskBounds?.x ?? group.x ?? group.bbox?.[0]?.[0] ?? 0;
+    const rawY = maskBounds?.y ?? group.y ?? group.bbox?.[0]?.[1] ?? 0;
+    const rawWidth = Math.max(maskBounds?.width ?? group.width ?? 0, 24 / state.zoom);
+    const rawHeight = Math.max(maskBounds?.height ?? group.height ?? 0, 24 / state.zoom);
+    const inset = Math.max(2 / state.zoom, Math.min(rawWidth, rawHeight) * 0.045);
+    const x = rawX + inset;
+    const y = rawY + inset;
+    const width = Math.max(rawWidth - inset * 2, 20 / state.zoom);
+    const height = Math.max(rawHeight - inset * 2, 20 / state.zoom);
+    const padding = Math.max(4 / state.zoom, Math.min(width, height) * 0.09);
+    const layout = fitCanvasTextToBubble(ctx, group.translated_text, width, height, {
+      maxFontSize: Math.max(12 / state.zoom, state.overlayFontSize / state.zoom),
+      minFontSize: 8 / state.zoom,
+      padding,
+    });
+    const radius = Math.min(width, height) * 0.2;
 
     ctx.save();
-    drawRoundedRect(ctx, x, y, width, height, radius);
+    if (group.mask?.length >= 3) {
+      drawPolygonPath(ctx, insetPolygon(group.mask, inset));
+    } else {
+      drawRoundedRect(ctx, x, y, width, height, radius);
+    }
     ctx.fillStyle = "rgba(255, 255, 255, 0.98)";
     ctx.fill();
+    if (group.id === state.selectedGroupId) {
+      ctx.lineWidth = 3 / state.zoom;
+      ctx.strokeStyle = "rgba(255, 209, 92, 0.95)";
+      ctx.stroke();
+    }
     ctx.fillStyle = "#111111";
-    ctx.font = `${fontSize}px Segoe UI`;
+    ctx.font = `${layout.fontSize}px Segoe UI`;
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.shadowColor = "rgba(255, 255, 255, 0.96)";
     ctx.shadowBlur = 5 / state.zoom;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
-    lines.forEach((line, index) => {
-      ctx.fillText(line, x + width / 2, startY + index * lineHeight);
+    layout.lines.forEach((line, index) => {
+      ctx.fillText(line, x + width / 2, y + layout.startY + index * layout.lineHeight);
     });
     ctx.restore();
   });
 }
 
-function wrapCanvasText(ctxRef, text, maxWidth, maxLines) {
-  const words = text.split(/\s+/);
-  if (words.length === 0) {
-    return [];
+function getPolygonBounds(polygon) {
+  if (!polygon || polygon.length < 3) {
+    return null;
   }
+  const xs = polygon.map((point) => point[0]);
+  const ys = polygon.map((point) => point[1]);
+  return {
+    x: Math.min(...xs),
+    y: Math.min(...ys),
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
+}
 
-  let line = "";
-  const lines = [];
+function insetPolygon(polygon, inset) {
+  const bounds = getPolygonBounds(polygon);
+  if (!bounds) {
+    return polygon;
+  }
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+  return polygon.map(([x, y]) => {
+    const dx = x - centerX;
+    const dy = y - centerY;
+    const length = Math.hypot(dx, dy) || 1;
+    const nextLength = Math.max(length - inset, 1);
+    return [
+      centerX + (dx / length) * nextLength,
+      centerY + (dy / length) * nextLength,
+    ];
+  });
+}
 
-  for (const word of words) {
-    const testLine = line ? `${line} ${word}` : word;
-    if (ctxRef.measureText(testLine).width > maxWidth && line) {
-      lines.push(line);
-      line = word;
-      if (lines.length >= maxLines) {
-        return lines;
-      }
+function drawPolygonPath(ctxRef, polygon) {
+  ctxRef.beginPath();
+  polygon.forEach(([x, y], index) => {
+    if (index === 0) {
+      ctxRef.moveTo(x, y);
     } else {
-      line = testLine;
+      ctxRef.lineTo(x, y);
+    }
+  });
+  ctxRef.closePath();
+}
+
+function fitCanvasTextToBubble(ctxRef, text, boxWidth, boxHeight, options = {}) {
+  const maxFontSize = options.maxFontSize || 20;
+  const minFontSize = options.minFontSize || 8;
+  const padding = options.padding || 4;
+  let low = minFontSize;
+  let high = Math.max(minFontSize, maxFontSize);
+  let best = null;
+
+  while (high - low > 0.5) {
+    const fontSize = (low + high) / 2;
+    const candidate = layoutCanvasText(ctxRef, text, boxWidth, boxHeight, fontSize, padding);
+    if (candidate.fits) {
+      best = candidate;
+      low = fontSize;
+    } else {
+      high = fontSize;
     }
   }
 
-  if (lines.length < maxLines && line) {
+  return best || layoutCanvasText(ctxRef, text, boxWidth, boxHeight, minFontSize, padding);
+}
+
+function layoutCanvasText(ctxRef, text, boxWidth, boxHeight, fontSize, padding) {
+  const safeWidth = Math.max(boxWidth - padding * 2, fontSize * 1.6);
+  const safeHeight = Math.max(boxHeight - padding * 2, fontSize * 1.2);
+  const lineHeight = fontSize * 1.16;
+  const maxLines = Math.max(1, Math.floor(safeHeight / lineHeight));
+
+  ctxRef.save();
+  ctxRef.font = `${fontSize}px Segoe UI`;
+  const lines = wrapCanvasText(ctxRef, text, safeWidth, maxLines);
+  const textHeight = lines.length * lineHeight;
+  const widestLine = lines.reduce((maxWidth, line) => Math.max(maxWidth, ctxRef.measureText(line).width), 0);
+  ctxRef.restore();
+  const fits = lines.length > 0 && textHeight <= safeHeight + 0.1 && widestLine <= safeWidth + 0.1 && !lines.some((line) => line.endsWith("…"));
+
+  return {
+    fits,
+    fontSize,
+    lineHeight,
+    lines,
+    startY: Math.max((boxHeight - textHeight) / 2, padding),
+  };
+}
+
+function wrapCanvasText(ctxRef, text, maxWidth, maxLines) {
+  const normalizedText = (text || "").replace(/\s+/g, " ").trim();
+  if (!normalizedText) {
+    return [];
+  }
+
+  const words = normalizedText.split(" ");
+  const lines = [];
+  let line = "";
+
+  for (const word of words) {
+    const candidateWord = shrinkTokenToWidth(ctxRef, word, maxWidth);
+    const testLine = line ? `${line} ${candidateWord}` : candidateWord;
+    if (ctxRef.measureText(testLine).width <= maxWidth || !line) {
+      line = testLine;
+      continue;
+    }
+
+    lines.push(line);
+    if (lines.length >= maxLines) {
+      return finalizeCanvasLines(ctxRef, lines, maxWidth, maxLines);
+    }
+    line = candidateWord;
+  }
+
+  if (line) {
     lines.push(line);
   }
 
-  return lines;
+  return finalizeCanvasLines(ctxRef, lines, maxWidth, maxLines);
+}
+
+function finalizeCanvasLines(ctxRef, lines, maxWidth, maxLines) {
+  const normalized = lines.slice(0, maxLines).map((line) => line.trim()).filter(Boolean);
+  if (!normalized.length) {
+    return [];
+  }
+  if (lines.length > maxLines) {
+    normalized[maxLines - 1] = addEllipsisToFit(ctxRef, normalized[maxLines - 1], maxWidth);
+  }
+  return normalized;
+}
+
+function shrinkTokenToWidth(ctxRef, token, maxWidth) {
+  if (ctxRef.measureText(token).width <= maxWidth) {
+    return token;
+  }
+
+  let result = token;
+  while (result.length > 1 && ctxRef.measureText(`${result}…`).width > maxWidth) {
+    result = result.slice(0, -1);
+  }
+  return result.length < token.length ? `${result}…` : result;
+}
+
+function addEllipsisToFit(ctxRef, line, maxWidth) {
+  let result = line;
+  while (result.length > 1 && ctxRef.measureText(`${result}…`).width > maxWidth) {
+    result = result.slice(0, -1).trimEnd();
+  }
+  return result.endsWith("…") ? result : `${result}…`;
 }
 
 function drawRoundedRect(ctxRef, x, y, width, height, radius) {
@@ -278,6 +412,7 @@ async function handleFileChange(event) {
   updateBlockCount();
   renderBlockList();
   renderGroupList();
+  updateBubbleReader();
   setActiveView("blocks");
 
   state.imageBitmap = await createImageBitmap(file);
@@ -322,6 +457,7 @@ async function detectOCR() {
     updateBlockCount();
     renderBlockList();
     renderGroupList();
+    updateBubbleReader();
     setActiveView("blocks");
     drawScene();
     setStatus(`OCR completed. Review ${state.blocks.length} block(s) and edit as needed.`, "success");
@@ -402,6 +538,7 @@ function renderGroupList() {
     card.addEventListener("click", () => {
       state.selectedGroupId = group.id;
       renderGroupList();
+      updateBubbleReader();
       drawScene();
     });
 
@@ -425,18 +562,42 @@ function renderGroupList() {
 
     sourceTextarea.addEventListener("input", (event) => {
       group.source_text = event.target.value;
+      updateBubbleReader();
     });
     correctedTextarea.addEventListener("input", (event) => {
       group.corrected_text = event.target.value;
+      updateBubbleReader();
     });
     translationTextarea.addEventListener("input", (event) => {
       group.translated_text = event.target.value;
+      updateBubbleReader();
       drawScene();
     });
 
     elements.groupList.appendChild(fragment);
   });
   elements.overlayButton.disabled = state.groups.length === 0;
+}
+
+function updateBubbleReader() {
+  const group = state.groups.find((item) => item.id === state.selectedGroupId);
+  if (!group || !state.overlayVisible) {
+    elements.bubbleReader.classList.add("hidden");
+    elements.bubbleReaderText.textContent = "";
+    elements.bubbleReaderMeta.textContent = "Click an inpainted bubble to read full text.";
+    return;
+  }
+
+  const fullText = group.translated_text || group.corrected_text || group.source_text || "";
+  if (!fullText.trim()) {
+    elements.bubbleReader.classList.add("hidden");
+    return;
+  }
+
+  elements.bubbleReader.classList.remove("hidden");
+  elements.bubbleReaderTitle.textContent = `Bubble #${group.id}`;
+  elements.bubbleReaderMeta.textContent = `Order ${group.reading_order} • Blocks ${group.block_ids.join(", ")}`;
+  elements.bubbleReaderText.textContent = fullText;
 }
 
 async function runPhase2() {
@@ -475,6 +636,7 @@ async function runPhase2() {
     state.overlayVisible = payload.translation_enabled && state.groups.some((group) => group.translated_text);
     updateBlockCount();
     renderGroupList();
+    updateBubbleReader();
     setActiveView("groups");
     drawScene();
     setStatus(
@@ -568,6 +730,13 @@ function scrollSelectedBlockIntoView() {
   }
 }
 
+function scrollSelectedGroupIntoView() {
+  const activeCard = elements.groupList.querySelector(".group-card.active");
+  if (activeCard) {
+    activeCard.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+
 function exportJSON() {
   const payload = {
     image: state.imageMeta || {
@@ -622,10 +791,29 @@ function isPointInPolygon(point, polygon) {
 
 function selectBlockAtPoint(clientX, clientY) {
   const point = toImageSpace(clientX, clientY);
+  if (state.overlayVisible) {
+    const groupHit = sortedGroups().find((group) => {
+      if (group.mask?.length >= 3) {
+        return isPointInPolygon(point, group.mask);
+      }
+      return isPointInPolygon(point, group.bbox || []);
+    });
+    if (groupHit) {
+      state.selectedGroupId = groupHit.id;
+      setActiveView("groups");
+      renderGroupList();
+      updateBubbleReader();
+      drawScene();
+      scrollSelectedGroupIntoView();
+      return;
+    }
+  }
+
   const hit = state.blocks.find((block) => isPointInPolygon(point, block.bbox));
   if (hit) {
     state.selectedBlockId = hit.id;
     renderBlockList();
+    elements.bubbleReader.classList.add("hidden");
     drawScene();
     scrollSelectedBlockIntoView();
   }
@@ -694,6 +882,7 @@ elements.phase2Button.addEventListener("click", runPhase2);
 elements.overlayButton.addEventListener("click", () => {
   state.overlayVisible = !state.overlayVisible;
   elements.overlayButton.textContent = state.overlayVisible ? "Hide Overlay" : "Show Overlay";
+  updateBubbleReader();
   drawScene();
 });
 elements.overlayFontSize.addEventListener("input", (event) => {

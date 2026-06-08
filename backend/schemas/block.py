@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class TextBlock(BaseModel):
     id: int
     bbox: list[list[int]] = Field(default_factory=list)
+    mask: list[list[int]] = Field(default_factory=list)
     text: str = ""
     confidence: float = 0.0
     direction: str = "horizontal"
@@ -32,6 +33,7 @@ class TextGroup(BaseModel):
     id: int
     block_ids: list[int] = Field(default_factory=list)
     bbox: list[list[int]] = Field(default_factory=list)
+    mask: list[list[int]] = Field(default_factory=list)
     x: int = 0
     y: int = 0
     width: int = 0

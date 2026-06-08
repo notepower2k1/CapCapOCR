@@ -24,6 +24,7 @@
           </label>
           <select id="sourceLang">
             <option value="ja">Japanese</option>
+            <option value="zh">Chinese</option>
             <option value="auto">Auto</option>
           </select>
           <select id="ocrEngine">
@@ -74,6 +75,13 @@
           <p class="canvas-hint">
             Wheel to zoom. Drag to pan. Click a bounding box to focus its OCR block.
           </p>
+          <div id="bubbleReader" class="bubble-reader hidden">
+            <div class="bubble-reader-head">
+              <strong id="bubbleReaderTitle">Bubble Reader</strong>
+              <span id="bubbleReaderMeta">Click an inpainted bubble to read full text.</span>
+            </div>
+            <pre id="bubbleReaderText" class="bubble-reader-text"></pre>
+          </div>
         </div>
 
         <aside class="card sidebar">
