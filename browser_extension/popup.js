@@ -78,6 +78,7 @@ async function loadSettings() {
   elements.translateEnabled.checked = settings.translateEnabled ?? elements.translateEnabled.checked;
   elements.overlayEnabled.checked = settings.overlayEnabled ?? elements.overlayEnabled.checked;
   elements.widgetEnabled.checked = settings.widgetEnabled ?? elements.widgetEnabled.checked;
+  elements.imageCandidate.dataset.savedValue = settings.selectedImageCandidateId || "";
   uiState = {
     settingsCollapsed: settings.ui?.settingsCollapsed ?? defaultUiState.settingsCollapsed,
     detailsCollapsed: settings.ui?.detailsCollapsed ?? defaultUiState.detailsCollapsed,
@@ -99,6 +100,7 @@ async function saveSettings() {
       translateEnabled: elements.translateEnabled.checked,
       overlayEnabled: elements.overlayEnabled.checked,
       widgetEnabled: elements.widgetEnabled.checked,
+      selectedImageCandidateId: elements.imageCandidate.value || "",
       ui: {
         settingsCollapsed: uiState.settingsCollapsed,
         detailsCollapsed: uiState.detailsCollapsed,
@@ -302,6 +304,19 @@ function imageSourceName(url) {
   }
 }
 
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function logInputDiagnostics(scope, diagnostics) {
+  console.log(`[CapCapOCR][${scope}] input`, diagnostics);
+}
+
 async function scanCandidates(tabId) {
   return runInTab(tabId, () => {
     const nextId = (() => {
@@ -398,7 +413,7 @@ async function scanCandidates(tabId) {
 }
 
 function populateCandidates(candidates) {
-  const previousValue = elements.imageCandidate.value;
+  const previousValue = elements.imageCandidate.value || elements.imageCandidate.dataset.savedValue || "";
   currentCandidates = candidates;
   elements.imageCandidate.innerHTML = "";
 
@@ -421,6 +436,7 @@ function populateCandidates(candidates) {
   if (preserved) {
     elements.imageCandidate.value = previousValue;
   }
+  elements.imageCandidate.dataset.savedValue = elements.imageCandidate.value || "";
 
   return {
     selectionChanged: preserved ? false : previousValue !== elements.imageCandidate.value,
@@ -532,9 +548,23 @@ async function getSelectedImageData(tabId) {
 
   if (captureInfo.src && !captureInfo.src.startsWith("blob:")) {
     try {
+      const imageBase64 = await fetchImageAsDataUrl(captureInfo.src);
       return {
-        imageBase64: await fetchImageAsDataUrl(captureInfo.src),
+        imageBase64,
         candidateId,
+        diagnostics: {
+          scope: "popup",
+          candidateId,
+          candidateKind: candidate.kind,
+          candidateSize: `${candidate.width}x${candidate.height}`,
+          sourceUrl: captureInfo.src,
+          sourceName: imageSourceName(captureInfo.src),
+          captureMode: "direct_fetch",
+          tagName: captureInfo.tagName,
+          rect: captureInfo.rect,
+          viewport: captureInfo.viewport,
+          imageHash: shortHash(imageBase64),
+        },
       };
     } catch {
       // Fall back to visible-tab crop if direct fetch is blocked.
@@ -542,9 +572,23 @@ async function getSelectedImageData(tabId) {
   }
 
   const screenshot = await captureVisibleTab();
+  const imageBase64 = await cropVisibleTab(screenshot, captureInfo.rect, captureInfo.viewport);
   return {
-    imageBase64: await cropVisibleTab(screenshot, captureInfo.rect, captureInfo.viewport),
+    imageBase64,
     candidateId,
+    diagnostics: {
+      scope: "popup",
+      candidateId,
+      candidateKind: candidate.kind,
+      candidateSize: `${candidate.width}x${candidate.height}`,
+      sourceUrl: captureInfo.src,
+      sourceName: imageSourceName(captureInfo.src || ""),
+      captureMode: "tab_crop",
+      tagName: captureInfo.tagName,
+      rect: captureInfo.rect,
+      viewport: captureInfo.viewport,
+      imageHash: shortHash(imageBase64),
+    },
   };
 }
 
@@ -799,6 +843,7 @@ async function runOverlayFlow() {
 
     setStatus("Reading selected page image...", "loading");
     const selectedImage = await getSelectedImageData(tab.id);
+    logInputDiagnostics("popup", selectedImage.diagnostics);
 
     setStatus("Running OCR...", "loading");
     const ocrPayload = await requestJson(
@@ -840,7 +885,10 @@ async function runOverlayFlow() {
     );
 
     elements.overlayText.value = joinOverlayText(phase2Payload.groups);
-    elements.rawJson.value = JSON.stringify(phase2Payload, null, 2);
+    elements.rawJson.value = JSON.stringify({
+      diagnostics: selectedImage.diagnostics,
+      phase2: phase2Payload,
+    }, null, 2);
 
     if (!overlayEnabled) {
       await clearOverlay().catch(() => {});
@@ -900,6 +948,8 @@ elements.widgetEnabled.addEventListener("change", () => {
 });
 
 elements.imageCandidate.addEventListener("change", () => {
+  elements.imageCandidate.dataset.savedValue = elements.imageCandidate.value || "";
+  persistSettingsSilently();
   clearOverlay().catch(() => {});
 });
 

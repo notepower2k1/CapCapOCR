@@ -171,6 +171,30 @@ function setStatus(node, message, kind = "idle") {
   node.className = `capcap-status ${kind}`;
 }
 
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function imageSourceName(url) {
+  try {
+    if (!url) return "image";
+    if (url.startsWith("data:")) return "data-url";
+    if (url.startsWith("blob:")) return "blob-url";
+    return new URL(url).hostname;
+  } catch {
+    return "image";
+  }
+}
+
+function logInputDiagnostics(scope, diagnostics) {
+  console.log(`[CapCapOCR][${scope}] input`, diagnostics);
+}
+
 function scanCandidates() {
   const nextId = (() => {
     let counter = 1;
@@ -302,6 +326,17 @@ async function fetchImageAsDataUrl(src) {
   return blobToDataUrl(blob);
 }
 
+async function fetchImageAsDataUrlViaBackground(src) {
+  const response = await chrome.runtime.sendMessage({
+    type: "capcapocr_fetch_image",
+    url: src,
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Background image fetch failed.");
+  }
+  return response.dataUrl;
+}
+
 async function captureVisibleTab() {
   const response = await chrome.runtime.sendMessage({ type: "capcapocr_capture_visible_tab" });
   if (!response?.ok) {
@@ -346,14 +381,70 @@ async function getSelectedImageData(candidate) {
 
   if (src && !src.startsWith("blob:")) {
     try {
-      return { imageBase64: await fetchImageAsDataUrl(src), candidateId: candidate.id };
-    } catch {}
+      const imageBase64 = await fetchImageAsDataUrlViaBackground(src);
+      return {
+        imageBase64,
+        candidateId: candidate.id,
+        diagnostics: {
+          scope: "widget",
+          candidateId: candidate.id,
+          candidateKind: candidate.kind,
+          candidateSize: `${candidate.width}x${candidate.height}`,
+          sourceUrl: src,
+          sourceName: imageSourceName(src),
+          captureMode: "background_fetch",
+          tagName: element.tagName,
+          rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+          imageHash: shortHash(imageBase64),
+        },
+      };
+    } catch {
+      try {
+        const imageBase64 = await fetchImageAsDataUrl(src);
+        return {
+          imageBase64,
+          candidateId: candidate.id,
+          diagnostics: {
+            scope: "widget",
+            candidateId: candidate.id,
+            candidateKind: candidate.kind,
+            candidateSize: `${candidate.width}x${candidate.height}`,
+            sourceUrl: src,
+            sourceName: imageSourceName(src),
+            captureMode: "direct_fetch",
+            tagName: element.tagName,
+            rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+            viewport: { width: window.innerWidth, height: window.innerHeight },
+            imageHash: shortHash(imageBase64),
+          },
+        };
+      } catch {}
+    }
   }
 
   const screenshot = await captureVisibleTab();
+  const imageBase64 = await cropVisibleTab(
+    screenshot,
+    { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+    { width: window.innerWidth, height: window.innerHeight }
+  );
   return {
-    imageBase64: await cropVisibleTab(screenshot, { left: rect.left, top: rect.top, width: rect.width, height: rect.height }, { width: window.innerWidth, height: window.innerHeight }),
+    imageBase64,
     candidateId: candidate.id,
+    diagnostics: {
+      scope: "widget",
+      candidateId: candidate.id,
+      candidateKind: candidate.kind,
+      candidateSize: `${candidate.width}x${candidate.height}`,
+      sourceUrl: src,
+      sourceName: imageSourceName(src),
+      captureMode: "tab_crop",
+      tagName: element.tagName,
+      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      imageHash: shortHash(imageBase64),
+    },
   };
 }
 
@@ -527,7 +618,8 @@ function renderOverlay(payload, selectedId) {
 async function runPipeline(widget) {
   const settings = await loadSettings();
   const candidates = scanCandidates();
-  const candidate = candidates[0];
+  const selectedCandidateId = settings.selectedImageCandidateId || "";
+  const candidate = candidates.find((item) => item.id === selectedCandidateId) || candidates[0];
 
   if (!candidate) {
     setStatus(widget.status, "No visible image candidate found.", "error");
@@ -545,6 +637,12 @@ async function runPipeline(widget) {
   try {
     setStatus(widget.status, `Running on ${candidate.kind} ${candidate.width}x${candidate.height}...`, "loading");
     const selectedImage = await getSelectedImageData(candidate);
+    logInputDiagnostics("widget", selectedImage.diagnostics);
+    setStatus(
+      widget.status,
+      `${selectedImage.diagnostics.captureMode} ${selectedImage.diagnostics.candidateKind} ${selectedImage.diagnostics.imageHash}`,
+      "loading"
+    );
 
     const ocrPayload = await requestJson(
       settings.apiUrl,
